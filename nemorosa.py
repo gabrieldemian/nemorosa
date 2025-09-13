@@ -10,19 +10,23 @@ import posixpath
 import json  # Added JSON module
 from typing import Optional
 from urllib.parse import urlparse
+
 # imports: third party
-from colorama import Fore, init, Style
+from colorama import init
 import requests
 import requests.cookies
 import transmission_rpc
 
 # imports: custom
-import modules.filecompare, modules.api, modules.cookies
+import modules.filecompare
+import modules.api
+import modules.cookies
 import modules.logger
 
 # constants
 PROCESSED_DIRS_FILE = "processed-dirs.txt"
 CHECK_TRACKERS = ["flacsfor.me", "home.opsfet.ch", "52dic.vip"]
+
 
 def parse_libtc_url(url):
     # transmission+http://127.0.0.1:9091/?session_path=/session/path/
@@ -34,8 +38,10 @@ def parse_libtc_url(url):
     scheme = parsed.scheme.split("+")
     netloc = parsed.netloc
     if "@" in netloc:
-        auth, netloc = netloc.rsplit("@", 1)  # 从右边分割一次，避免密码中的@导致分割错误
-        username, password = auth.split(":", 1) # 分割一次，允许密码中包含":"
+        auth, netloc = netloc.rsplit(
+            "@", 1
+        )  # 从右边分割一次，避免密码中的@导致分割错误
+        username, password = auth.split(":", 1)  # 分割一次，允许密码中包含":"
         kwargs["username"] = username
         kwargs["password"] = password
 
@@ -43,33 +49,38 @@ def parse_libtc_url(url):
     if client in ["qbittorrent"]:
         kwargs["url"] = f"{scheme[1]}://{netloc}{parsed.path}"
     else:
-        kwargs['scheme'] = scheme[1]
+        kwargs["scheme"] = scheme[1]
         kwargs["host"], kwargs["port"] = netloc.split(":")
         kwargs["port"] = int(kwargs["port"])
 
     return kwargs
 
+
 # ================== JSON Helper Functions ==================
 def load_json_with_default(file_path, default=None):
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return default
-    
+
+
 def append_to_json_set(file_path, record):
     data = set(load_json_with_default(file_path, set()))
     data.add(record)
-    with open(file_path, 'w', encoding="utf-8") as f:
+    with open(file_path, "w", encoding="utf-8") as f:
         json.dump(list(data), f, indent=4, ensure_ascii=False)
+
 
 def append_to_json_dict(file_path, key, value):
     data = load_json_with_default(file_path, {})
     data[key] = value
-    with open(file_path, 'w', encoding="utf-8") as f:
+    with open(file_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
 
+
 # ================== Torrent Directory Processing Functions ==================
+
 
 def check_path(path: str, is_file: bool = False, auto_create: bool = False):
     if path is not None:
@@ -97,6 +108,7 @@ def check_path(path: str, is_file: bool = False, auto_create: bool = False):
                     logger.success("Directory automatically created: {}".format(path))
                     os.makedirs(path)
 
+
 def scan(
     *,
     fdict: dict,
@@ -120,7 +132,13 @@ def scan(
     scan_querys = []
     max_fnames = sorted(fdict.keys(), key=lambda fname: len(fname), reverse=True)
     for index, fname in enumerate(max_fnames):
-        if index == 0 or posixpath.splitext(fname)[1] in [".flac", ".mp3", ".dsf", ".dff", ".m4a"]:
+        if index == 0 or posixpath.splitext(fname)[1] in [
+            ".flac",
+            ".mp3",
+            ".dsf",
+            ".dff",
+            ".m4a",
+        ]:
             scan_querys.append(fname)
         if len(scan_querys) >= 5:
             break
@@ -128,23 +146,23 @@ def scan(
     for fname in scan_querys:
         logger.debug(f"Searching for file: {fname}")
         search_resp = api.search_torrent_by_filename(fname)
-        
+
         # 记录API响应状态
         if search_resp.get("status") != "success":
             logger.warning(f"API failure for file '{fname}': {json.dumps(search_resp)}")
             continue
         else:
             logger.debug(f"API search successful for file '{fname}'")
-        
+
         # 处理搜索结果
         torrents = []
         for group in search_resp["response"]["results"]:
             if "torrents" in group:
                 torrents.extend(group["torrents"])
-        
+
         # 记录找到的结果数量
         logger.debug(f"Found {len(torrents)} potential matches for file '{fname}'")
-        
+
         # 按大小匹配
         size_match_found = False
         for t in torrents:
@@ -153,55 +171,76 @@ def scan(
                 size_match_found = True
                 logger.success(f"Size match found! Torrent ID: {tid} (Size: {tsize})")
                 break
-        
+
         if size_match_found:
             break
-        
+
         # 处理结果过多的情况
         if len(torrents) > 20:
-            logger.warning(f"Too many results found for file '{fname}' ({len(torrents)}). Skipping.")
+            logger.warning(
+                f"Too many results found for file '{fname}' ({len(torrents)}). Skipping."
+            )
             continue
-        
+
         # 按文件内容匹配
         if tid == -1:
             logger.debug(f"No size match found. Checking file contents for '{fname}'")
             for t_index, t in enumerate(torrents, 1):
-                logger.debug(f"Checking torrent #{t_index}/{len(torrents)}: ID {t['torrentId']}")
-                
+                logger.debug(
+                    f"Checking torrent #{t_index}/{len(torrents)}: ID {t['torrentId']}"
+                )
+
                 resp = api.torrent(t["torrentId"])
                 resp_files = resp.get("fileList", {})
-                
+
                 # 检查当前文件是否匹配
                 if resp_files.get(fname, 0) == fdict[fname]:
                     # 如果是音乐文件，直接匹配
                     matched = False
-                    if posixpath.splitext(fname)[1] in [".flac", ".mp3", ".dsf", ".dff", ".m4a"]:
+                    if posixpath.splitext(fname)[1] in [
+                        ".flac",
+                        ".mp3",
+                        ".dsf",
+                        ".dff",
+                        ".m4a",
+                    ]:
                         tid = t["torrentId"]
                         matched = True
                     else:
                         check_music_file = scan_querys[-1]
-                        if resp_files.get(check_music_file, 0) == fdict[check_music_file]:
+                        if (
+                            resp_files.get(check_music_file, 0)
+                            == fdict[check_music_file]
+                        ):
                             tid = t["torrentId"]
                             matched = True
 
                     if matched:
-                        logger.success(f"Music file match found! Torrent ID: {tid} (File: {fname})")
+                        logger.success(
+                            f"Music file match found! Torrent ID: {tid} (File: {fname})"
+                        )
                         # 检查文件冲突
                         if modules.filecompare.check_conflicts(fdict, resp_files):
                             logger.debug("Conflict detected. Skipping this torrent.")
                             tid = -1  # 重置tid
-                        
+
                         break
-        
+
         # 如果找到匹配，提前退出
         if tid != -1:
             logger.debug(f"Match found with file '{fname}'. Stopping search.")
             break
-        
+
         # 如果没有更多结果，停止搜索
         if len(torrents) == 0 or search_resp["response"]["pages"] <= 1:
             logger.debug(f"No more results for file '{fname}'")
-            if posixpath.splitext(fname)[1] in [".flac", ".mp3", ".dsf", ".dff", ".m4a"]:
+            if posixpath.splitext(fname)[1] in [
+                ".flac",
+                ".mp3",
+                ".dsf",
+                ".dff",
+                ".m4a",
+            ]:
                 logger.debug("Stopping search as music file match is not found")
                 break
 
@@ -220,13 +259,17 @@ def scan(
         for f in torrent_object["info"]["files"]:
             tsize += f["length"]
             fdict_torrent["/".join(f["path"])] = f["length"]
-        
+
         rename_map = modules.filecompare.generate_rename_map(fdict, fdict_torrent)
 
         downloaded = False
         if not no_download:
             if inject_transmission_client(
-                transmission_client, torrent_data, download_dir, original_name, rename_map
+                transmission_client,
+                torrent_data,
+                download_dir,
+                original_name,
+                rename_map,
             ):
                 downloaded = True
                 GLOBAL["downloaded"] += 1
@@ -251,18 +294,29 @@ def scan(
         append_to_json_set(result_url_path, tid)
         append_to_json_dict(result_map_path, os.path.split(scan_source)[1], tid)
         if not downloaded:
-            append_to_json_dict(result_url_undownloaded_path, tid, {"download_dir": download_dir, "original_name": original_name, "rename_map": rename_map})
+            append_to_json_dict(
+                result_url_undownloaded_path,
+                tid,
+                {
+                    "download_dir": download_dir,
+                    "original_name": original_name,
+                    "rename_map": rename_map,
+                },
+            )
         append_to_json_set(scan_history_path, scan_source)
     return tid, downloaded
 
+
 # ================== Transmission Client Functions ==================
+
 
 def inject_transmission_client(
     transmission_client: transmission_rpc.Client,
     torrent_data,
     download_dir: str,
     original_torrent_name: Optional[str] = None,
-    rename_map: Optional[dict] = {}):
+    rename_map: Optional[dict] = {},
+):
     """
     Inject a torrent into the Transmission client from a download URL.
     """
@@ -270,84 +324,126 @@ def inject_transmission_client(
     max_retries = 8
     for attempt in range(max_retries):
         try:
-            added_torrent = transmission_client.add_torrent(torrent_data, download_dir=download_dir, paused=True, labels=["nemorosa"])
+            added_torrent = transmission_client.add_torrent(
+                torrent_data,
+                download_dir=download_dir,
+                paused=True,
+                labels=["nemorosa"],
+            )
             if added_torrent.name != original_torrent_name:
-                transmission_client.rename_torrent_path(added_torrent.id, location=added_torrent.name, name=original_torrent_name)
-                logger.debug(f"Renamed torrent from {added_torrent.name} to {original_torrent_name}")
+                transmission_client.rename_torrent_path(
+                    added_torrent.id,
+                    location=added_torrent.name,
+                    name=original_torrent_name,
+                )
+                logger.debug(
+                    f"Renamed torrent from {added_torrent.name} to {original_torrent_name}"
+                )
             if rename_map != {}:
                 for torrent_file_name, local_file_name in rename_map.items():
-                    transmission_client.rename_torrent_path(added_torrent.id, location=posixpath.join(original_torrent_name, torrent_file_name), name=local_file_name)
-                    logger.debug(f"Renamed torrent file {torrent_file_name} to {local_file_name}")
+                    transmission_client.rename_torrent_path(
+                        added_torrent.id,
+                        location=posixpath.join(
+                            original_torrent_name, torrent_file_name
+                        ),
+                        name=local_file_name,
+                    )
+                    logger.debug(
+                        f"Renamed torrent file {torrent_file_name} to {local_file_name}"
+                    )
 
                 transmission_client.verify_torrent(added_torrent.id)
             logger.success("Torrent added to Transmission successfully")
             return True
         except Exception as e:
             if attempt < max_retries - 1:
-                logger.debug(f"Error injecting torrent into Transmission: {e}, retrying ({attempt + 1}/{max_retries})...")
+                logger.debug(
+                    f"Error injecting torrent into Transmission: {e}, retrying ({attempt + 1}/{max_retries})..."
+                )
                 time.sleep(2)
             else:
-                logger.error(f"Failed to inject torrent into Transmission after {max_retries} attempts: {e}")
+                logger.error(
+                    f"Failed to inject torrent into Transmission after {max_retries} attempts: {e}"
+                )
                 return False
 
-def get_transmission_torrents(transmission_client: transmission_rpc.Client, target_trackers: list) -> list[dict]:
+
+def get_transmission_torrents(
+    transmission_client: transmission_rpc.Client, target_trackers: list
+) -> list[dict]:
     """
     Retrieve torrents from Transmission client based on filter rules
     """
     try:
         # Get all torrents
         torrents = transmission_client.get_torrents()
-        
+
         # Apply filter rules
         filtered_torrents = {}
         already_cross_seeded_names = set()
 
         for torrent in torrents:
-            
-            if any(any(check_str in url for check_str in target_trackers) for url in torrent.tracker_list):
+            if any(
+                any(check_str in url for check_str in target_trackers)
+                for url in torrent.tracker_list
+            ):
                 already_cross_seeded_names.add(torrent.name)
 
             # Apply name pattern filter
-            if any(any(check_str in url for check_str in CHECK_TRACKERS) for url in torrent.tracker_list):
-                
+            if any(
+                any(check_str in url for check_str in CHECK_TRACKERS)
+                for url in torrent.tracker_list
+            ):
                 if torrent.name in filtered_torrents:
-                    if len(torrent.fields['files']) > len(filtered_torrents[torrent.name]['files']):
+                    if len(torrent.fields["files"]) > len(
+                        filtered_torrents[torrent.name]["files"]
+                    ):
                         continue
-                    elif len(torrent.fields['files']) == len(filtered_torrents[torrent.name]['files']):
-                        if torrent.total_size > filtered_torrents[torrent.name]['totalSize']:
+                    elif len(torrent.fields["files"]) == len(
+                        filtered_torrents[torrent.name]["files"]
+                    ):
+                        if (
+                            torrent.total_size
+                            > filtered_torrents[torrent.name]["totalSize"]
+                        ):
                             continue
 
                 # If passed all filters, include in results
                 filtered_torrents[torrent.name] = {
-                    'hash': torrent.hash_string,
-                    'percentDone': torrent.percent_done,
-                    'totalSize': torrent.total_size,
-                    'files': torrent.fields['files'],
-                    'trackers': torrent.tracker_list,
-                    'downloadDir':torrent.download_dir
+                    "hash": torrent.hash_string,
+                    "percentDone": torrent.percent_done,
+                    "totalSize": torrent.total_size,
+                    "files": torrent.fields["files"],
+                    "trackers": torrent.tracker_list,
+                    "downloadDir": torrent.download_dir,
                 }
-        
+
         for name in already_cross_seeded_names:
             if name in filtered_torrents:
                 del filtered_torrents[name]
 
         return filtered_torrents
-    
+
     except Exception as e:
         logger.error("Error retrieving torrents from Transmission: %s", e)
         return []
 
-def process_transmission_torrents(transmission_client, api, result_dir, no_download, target_trackers):
+
+def process_transmission_torrents(
+    transmission_client, api, result_dir, no_download, target_trackers
+):
     """
     Process torrents from Transmission client
     """
     logger.section("===== Processing Transmission Torrents =====")
-    
+
     # Set up paths for results with JSON extensions
     scan_history_path = os.path.join(result_dir, "transmission_scan_history.json")
     result_url_path = os.path.join(result_dir, "transmission_result_url.json")
     result_map_path = os.path.join(result_dir, "transmission_result_mapping.json")
-    result_url_undownloaded_path = os.path.join(result_dir, "transmission_result_url_undownloaded.json")
+    result_url_undownloaded_path = os.path.join(
+        result_dir, "transmission_result_url_undownloaded.json"
+    )
 
     # Create necessary directories/files
     check_path(result_dir, auto_create=True)
@@ -356,53 +452,62 @@ def process_transmission_torrents(transmission_client, api, result_dir, no_downl
     check_path(result_map_path, is_file=True, auto_create=True)
     check_path(result_url_undownloaded_path, is_file=True, auto_create=True)
 
-    GLOBAL = {
-        "found": 0,
-        "downloaded": 0,
-        "scanned": 0,
-        "cnt_dl_fail": 0
-    }
+    GLOBAL = {"found": 0, "downloaded": 0, "scanned": 0, "cnt_dl_fail": 0}
 
     try:
         # Get already scanned torrents from JSON
         scanned_set = set(load_json_with_default(scan_history_path, set()))
-        
+
         # Get torrents from Transmission
         torrents = get_transmission_torrents(transmission_client, target_trackers)
-        logger.debug("Found %d torrents in Transmission matching the criteria", len(torrents))
-        
-        for i, (torrent_name, torrent_details) in enumerate(torrents.items()):
+        logger.debug(
+            "Found %d torrents in Transmission matching the criteria", len(torrents)
+        )
 
+        for i, (torrent_name, torrent_details) in enumerate(torrents.items()):
             # Skip already scanned torrents
-            if torrent_details['hash'] in scanned_set:
-                logger.debug("Skipping already scanned torrent: %s (%s)", torrent_name, torrent_details['hash'])
+            if torrent_details["hash"] in scanned_set:
+                logger.debug(
+                    "Skipping already scanned torrent: %s (%s)",
+                    torrent_name,
+                    torrent_details["hash"],
+                )
                 continue
-                
-            logger.header("Processing %d/%d: %s (%s)", i+1, len(torrents), torrent_name, torrent_details['hash'])
-            
+
+            logger.header(
+                "Processing %d/%d: %s (%s)",
+                i + 1,
+                len(torrents),
+                torrent_name,
+                torrent_details["hash"],
+            )
+
             # Prepare file list and size
-            tsize = torrent_details['totalSize']
-            fdict = {posixpath.relpath(f['name'], torrent_name): f['length'] for f in torrent_details['files']}
+            tsize = torrent_details["totalSize"]
+            fdict = {
+                posixpath.relpath(f["name"], torrent_name): f["length"]
+                for f in torrent_details["files"]
+            }
             # Scan for matches
             scan(
-                fdict=fdict, 
-                tsize=tsize, 
-                scan_source=torrent_details['hash'],
+                fdict=fdict,
+                tsize=tsize,
+                scan_source=torrent_details["hash"],
                 original_name=torrent_name,
                 api=api,
-                download_dir=torrent_details['downloadDir'],
+                download_dir=torrent_details["downloadDir"],
                 transmission_client=transmission_client,
                 result_url_path=result_url_path,
                 result_map_path=result_map_path,
                 scan_history_path=scan_history_path,
                 result_url_undownloaded_path=result_url_undownloaded_path,
                 no_download=no_download,
-                GLOBAL=GLOBAL
+                GLOBAL=GLOBAL,
             )
-            
+
             # Record that we've processed this torrent
-            append_to_json_set(scan_history_path, torrent_details['hash'])
-    
+            append_to_json_set(scan_history_path, torrent_details["hash"])
+
     except Exception as e:
         logger.error("Error processing Transmission torrents: %s", e)
         logger.error(traceback.format_exc())
@@ -431,7 +536,9 @@ def main():
             return ", ".join(action.option_strings) + " " + args_string
 
     # argparse custom help format
-    fmt = lambda prog: CustomHelpFormatter(prog)
+    def fmt(prog):
+        return CustomHelpFormatter(prog)
+
     # argparse parser
     parser = argparse.ArgumentParser(
         description="Scan Transmission client torrents to find matches on WhatAPI",
@@ -536,7 +643,9 @@ def main():
     logger.section("===== Establishing Connections =====")
     logger.debug("Getting connection to API...")
     try:
-        api = modules.api.WhatAPI(api_key=apikey, interval=interval, cookies=cookies, server=server)
+        api = modules.api.WhatAPI(
+            api_key=apikey, interval=interval, cookies=cookies, server=server
+        )
         logger.success("API connection established")
     except Exception as e:
         logger.critical("API connection failed: {}".format(str(e)))
@@ -561,8 +670,9 @@ def main():
     except Exception as e:
         logger.critical("Error connecting to Transmission client: %s", e)
         sys.exit(1)
-        
+
     logger.section("===== Nemorosa Finished =====")
+
 
 if __name__ == "__main__":
     # initialise colorama
