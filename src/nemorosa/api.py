@@ -1,0 +1,548 @@
+import html
+import json
+import time
+from urllib.parse import parse_qs, urljoin, urlparse
+
+import humanfriendly
+import requests
+import torf
+from bs4 import BeautifulSoup, Tag
+
+from . import config, logger
+
+
+class LoginException(Exception):
+    pass
+
+
+class RequestException(Exception):
+    pass
+
+
+class GazelleBase:
+    """Base class for Gazelle API, containing common attributes and methods."""
+
+    def __init__(self, interval, server=None):
+        self.session = requests.Session()
+        self.session.headers = {
+            "Accept-Charset": "utf-8",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
+            " Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0",
+        }
+        self.server = server
+        self.authkey = None
+        self.passkey = None
+        self.last_request_time = 0
+        self.interval = interval + 0.1  # seconds between requests
+        self.logger = logger.ColorLogger(loglevel=config.cfg.global_config.loglevel)
+
+    def wait(self):
+        """Ensure request interval time."""
+        now = time.monotonic()
+        elapsed = now - self.last_request_time
+        if elapsed < self.interval:
+            sleep_time = self.interval - elapsed
+            self.logger.debug(f"Sleep for {sleep_time:.2f} seconds")
+            time.sleep(sleep_time)
+        self.last_request_time = time.monotonic()
+
+    def torrent(self, torrent_id):
+        """Get torrent object - subclasses need to implement specific request logic.
+
+        Args:
+            torrent_id: The ID of the torrent to retrieve.
+
+        Returns:
+            dict: Torrent object data, empty dict on error.
+        """
+        torrent_object = {}
+        self.logger.debug(f"Getting torrent by id: {torrent_id}")
+        try:
+            torrent_lookup = self._get_torrent_data(torrent_id)
+        except Exception as e:
+            self.logger.error(f"Failed to get torrent by id {torrent_id}. Error: {e}")
+            return torrent_object  # return empty dict on error
+
+        torrent_lookup_status = torrent_lookup.get("status", None)
+        if torrent_lookup_status == "success":
+            self.logger.debug(f"Torrent lookup successful for id: {torrent_id}")
+            torrent_object = torrent_lookup["response"]["torrent"]
+            torrent_object["fileList"] = self.parse_file_list(torrent_object.get("fileList", ""))
+        else:
+            self.logger.error(f"Torrent lookup failed for id: {torrent_id}. Status: {torrent_lookup_status}")
+        return torrent_object
+
+    def _get_torrent_data(self, torrent_id):
+        """Get torrent data - subclasses must implement.
+
+        Args:
+            torrent_id: The ID of the torrent to retrieve.
+
+        Returns:
+            dict: Response data from the API.
+
+        Raises:
+            NotImplementedError: Always raised for base class.
+        """
+        raise NotImplementedError("Subclasses must implement _get_torrent_data")
+
+    def parse_file_list(self, file_list_str):
+        """Parse the file list from a torrent object.
+
+        The file list is expected to be a string with entries separated by '|||'.
+        Each entry is in the format 'filename{{{filesize}}}'.
+
+        Args:
+            file_list_str (str): Raw file list string from torrent object.
+
+        Returns:
+            dict: Dictionary mapping filename to file size.
+        """
+        file_list = {}
+        if file_list_str:
+            self.logger.debug("Parsing file list")
+            # split the string into individual entries
+            entries = file_list_str.split("|||")
+            for entry in entries:
+                # split filename and filesize
+                parts = entry.split("{{{")
+                if len(parts) == 2:
+                    filename = html.unescape(parts[0].strip())
+                    filesize = parts[1].removesuffix("}}}").strip()
+                    file_list[filename] = int(filesize)
+                else:
+                    self.logger.warning(f"Malformed entry in file list: {entry}")
+        else:
+            self.logger.warning("File list is empty or None")
+
+        return file_list
+
+    def download_torrent(self, torrent_id):
+        """Download a torrent by its ID.
+
+        Args:
+            torrent_id: The ID of the torrent to download.
+
+        Returns:
+            bytes: The content of the torrent file with potentially modified source flag,
+                  or None if download fails.
+        """
+        max_retries = 8
+        for attempt in range(max_retries):
+            try:
+                self.wait()
+                response = self._download_torrent_response(torrent_id)
+                if response.status_code != 200:
+                    self.logger.error(f"Status of request is {response.status_code}. Aborting...")
+                    self.logger.error(f"Response content: {response._content}")
+                    raise RequestException
+
+                self.logger.debug(f"Torrent {torrent_id} downloaded successfully")
+
+                # Check and modify source flag
+                modified_content = self._check_and_modify_source_flag(response.content)
+                return modified_content
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    self.logger.warning(f"Error downloading torrent: {e}, retrying ({attempt + 1}/{max_retries})...")
+                    time.sleep(2)
+                else:
+                    self.logger.error(f"Failed to download torrent after {max_retries} attempts: {e}")
+                    return None
+
+    def _download_torrent_response(self, torrent_id):
+        """Get download torrent response - subclasses must implement.
+
+        Args:
+            torrent_id: The ID of the torrent to download.
+
+        Returns:
+            requests.Response: HTTP response object.
+
+        Raises:
+            NotImplementedError: Always raised for base class.
+        """
+        raise NotImplementedError("Subclasses must implement _download_torrent_response")
+
+    def get_torrent_link(self, torrent_id):
+        """Get the direct download link for a torrent by its ID.
+
+        Args:
+            torrent_id: The ID of the torrent.
+
+        Returns:
+            str: Direct download URL for the torrent.
+        """
+        return (
+            f"{self.server}/torrents.php?action=download"
+            f"&id={torrent_id}"
+            f"&authkey={self.authkey}"
+            f"&torrent_pass={self.passkey}"
+        )
+
+    def search_torrent_by_filename(self, filename):
+        """Search torrents by filename - subclasses must implement specific logic.
+
+        Args:
+            filename (str): Filename to search for.
+
+        Returns:
+            list: List of matching torrent objects.
+
+        Raises:
+            NotImplementedError: Always raised for base class.
+        """
+        raise NotImplementedError("Subclasses must implement search_torrent_by_filename")
+
+    def _check_and_modify_source_flag(self, torrent_content: bytes) -> bytes:
+        """Check and modify the source flag of a torrent.
+
+        Args:
+            torrent_content: Byte content of the torrent file.
+
+        Returns:
+            Modified torrent file byte content.
+        """
+        try:
+            # Load torrent content using torf
+            torrent = torf.Torrent.read_stream(torrent_content)
+
+            # Get current source flag (if exists)
+            current_source = torrent.source
+
+            expected_source = SOURCE_FLAG_MAPPING.get(self.server)
+
+            # If source flag doesn't match, modify it
+            if current_source != expected_source:
+                logger.ColorLogger().info(
+                    f"Modifying source flag from '{current_source}' to '{expected_source}' for server {self.server}"
+                )
+                torrent.source = expected_source
+                modified_content = torrent.dump()
+
+                return modified_content
+            else:
+                logger.ColorLogger().debug(
+                    f"Source flag '{current_source}' already matches expected '{expected_source}' "
+                    f"for server {self.server}"
+                )
+                return torrent_content
+
+        except Exception as e:
+            logger.ColorLogger().error(f"Error checking/modifying source flag: {e}")
+            # Return original content on error
+            return torrent_content
+
+
+class GazelleJSONAPI(GazelleBase):
+    def __init__(self, interval, api_key=None, cookies=None, server=None):
+        super().__init__(interval, server)
+
+        # Add API key to headers (if provided)
+        if api_key:
+            self.session.headers["Authorization"] = api_key
+
+        self.auth_method = "api_key" if api_key else "cookies"
+
+        if api_key is None and cookies:
+            self.session.cookies = cookies
+            try:
+                self._auth()
+            except RequestException as e:
+                self.logger.error(f"Failed to authenticate with cookies: {e}")
+
+    def _auth(self):
+        """Get auth key from server.
+
+        Raises:
+            RequestException: If authentication fails.
+        """
+        accountinfo = self.request("index")
+        self.authkey = accountinfo["response"]["authkey"]
+        self.passkey = accountinfo["response"]["passkey"]
+
+    def logout(self):
+        """Log out user."""
+        logoutpage = self.server + "/logout.php"
+        params = {"auth": self.authkey}
+        self.session.get(logoutpage, params=params, allow_redirects=False)
+
+    def request(self, action, **kwargs):
+        """Make an AJAX request at a given action page.
+
+        Args:
+            action (str): The action to perform.
+            **kwargs: Additional parameters for the request.
+
+        Returns:
+            dict: JSON response from the server.
+
+        Raises:
+            RequestException: If the request fails.
+        """
+        ajaxpage = self.server + "/ajax.php"
+        params = {"action": action}
+        if self.authkey:
+            params["auth"] = self.authkey
+        params.update(kwargs)
+
+        self.wait()  # Respect rate limit
+
+        r = self.session.get(ajaxpage, params=params, allow_redirects=False)
+        try:
+            json_response = r.json()
+            if json_response["status"] != "success":
+                raise RequestException
+            return json_response
+        except ValueError as e:
+            raise RequestException from e
+
+    def _get_torrent_data(self, torrent_id):
+        """Implement the base class abstract method.
+
+        Args:
+            torrent_id: The ID of the torrent to retrieve.
+
+        Returns:
+            dict: Response data from the torrent API.
+        """
+        return self.request("torrent", id=torrent_id)
+
+    def search_torrent_by_filename(self, filename):
+        params = {"filelist": filename}
+        try:
+            response = self.request("browse", **params)
+            # Log API response status
+            if response.get("status") != "success":
+                self.logger.warning(f"API failure for file '{filename}': {json.dumps(response, ensure_ascii=False)}")
+                return []
+            else:
+                self.logger.debug(f"API search successful for file '{filename}'")
+
+            # Process search results
+            torrents = []
+            for group in response["response"]["results"]:
+                if "torrents" in group:
+                    torrents.extend(group["torrents"])
+
+            return torrents
+        except Exception as e:
+            self.logger.error(f"Error searching for torrent by filename '{filename}': {e}")
+            return []
+
+    def _download_torrent_response(self, torrent_id):
+        """Implement the base class abstract method - get download torrent response.
+
+        Args:
+            torrent_id: The ID of the torrent to download.
+
+        Returns:
+            requests.Response: HTTP response object.
+        """
+        if self.auth_method == "api_key":
+            ajaxpage = self.server + "/ajax.php"
+            return self.session.get(ajaxpage, params={"action": "download", "id": torrent_id})
+        else:
+            torrent_link = self.get_torrent_link(torrent_id)
+            return self.session.get(torrent_link)
+
+
+class GazelleParser(GazelleBase):
+    def __init__(self, interval, cookies=None, server=None, api_key=None):
+        super().__init__(interval, server)
+
+        if cookies:
+            self.session.cookies.update(cookies)
+            self.logger.info("Using provided cookies")
+        else:
+            self.logger.warning("No cookies provided")
+
+    def request(self, url, params=None, method="GET", data=None):
+        """Send HTTP request and return response.
+
+        Args:
+            url (str): Request URL.
+            params (dict, optional): Query parameters.
+            method (str): HTTP method. Defaults to "GET".
+            data (dict, optional): Request body data.
+
+        Returns:
+            requests.Response: HTTP response object.
+
+        Raises:
+            ValueError: If unsupported HTTP method is used.
+        """
+        self.wait()
+        full_url = urljoin(self.server, url)
+
+        if method == "GET":
+            response = self.session.get(full_url, params=params)
+        elif method == "POST":
+            response = self.session.post(full_url, data=data, params=params)
+        else:
+            raise ValueError("Unsupported HTTP method")
+
+        return response
+
+    def search_torrent_by_filename(self, filename):
+        """Execute search and return torrent list.
+
+        Args:
+            filename (str): Filename to search for.
+
+        Returns:
+            list: List containing torrent information.
+        """
+        params = {"action": "advanced", "filelist": filename}
+
+        response = self.request("torrents.php", params=params)
+        return self.parse_search_results(response.text)
+
+    def parse_search_results(self, html):
+        """Parse search results page.
+
+        Args:
+            html (str): HTML content of the search results page.
+
+        Returns:
+            list: List of parsed torrent information.
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        torrents = []
+
+        # Find all torrents under albums
+        torrent_rows = soup.select("tr.group_torrent")
+        for torrent_row in torrent_rows:
+            torrent = self.parse_torrent_row(torrent_row)
+            if torrent:
+                torrents.append(torrent)
+
+        return torrents
+
+    def parse_torrent_row(self, row: Tag):
+        """Parse single torrent row.
+
+        Args:
+            row (Tag): BeautifulSoup Tag object representing a torrent row.
+
+        Returns:
+            dict: Parsed torrent information, or None if parsing fails.
+        """
+        try:
+            # Get download link
+            download_link = row.select_one('a[href^="torrents.php?action=download&id="]')
+            if not download_link:
+                return None
+
+            parsed_url = urlparse(download_link["href"])
+            query_params = parse_qs(parsed_url.query)
+            torrent_id = query_params.get("id", [None])[0]
+            if not torrent_id:
+                return None
+
+            self.authkey = query_params.get("authkey", [None])[0]
+            self.passkey = query_params.get("torrent_pass", [None])[0]
+
+            full_download_url = urljoin(self.server, download_link["href"])
+
+            # Get torrent size
+            size_cell = row.select("td")[3]  # Column 4 is size
+            size_text = size_cell.get_text(strip=True).replace(",", "")
+            size = humanfriendly.parse_size(size_text, binary=True)
+
+            # Get title
+            title_node = row.select_one("td:nth-child(2) > div > a")
+            title = title_node.get_text(strip=True) if title_node else f"Torrent {torrent_id}"
+
+            # Get torrent type
+            format_nodes = row.select("td:nth-child(2) > div > span")
+            formats = [span.get_text(strip=True) for span in format_nodes] if format_nodes else []
+
+            # Get torrent info
+            info_nodes = row.select("td:nth-child(2) > div > span.small")
+            info_text = info_nodes[0].get_text(strip=True) if info_nodes else ""
+
+            return {
+                "torrentId": torrent_id,
+                "download_link": full_download_url,
+                "size": size,
+                "title": title,
+                "formats": formats,
+                "info": info_text,
+            }
+        except Exception as e:
+            self.logger.error(f"Error parsing torrent row: {e}")
+            return None
+
+    def _get_torrent_data(self, torrent_id):
+        """Implement the base class abstract method.
+
+        Args:
+            torrent_id: The ID of the torrent to retrieve.
+
+        Returns:
+            dict: Response data from the torrent API.
+        """
+        params = {"action": "torrent", "id": torrent_id}
+        response = self.request("ajax.php", params=params)
+        return response.json()
+
+    def _download_torrent_response(self, torrent_id):
+        """Implement the base class abstract method - get download torrent response.
+
+        Args:
+            torrent_id: The ID of the torrent to download.
+
+        Returns:
+            requests.Response: HTTP response object.
+        """
+        download_url = self.get_torrent_link(torrent_id)
+        return self.request(download_url)
+
+
+API_TYPE_MAPPING = {
+    "https://redacted.sh": GazelleJSONAPI,
+    "https://orpheus.network": GazelleJSONAPI,
+    "https://dicmusic.com": GazelleJSONAPI,
+    "https://libble.me": GazelleParser,
+    "https://lztr.me": GazelleParser,
+}
+
+API_INTERVAL_MAPPING = {
+    "https://redacted.sh": 1,
+    "https://orpheus.network": 2,
+    "https://dicmusic.com": 2,
+    "https://libble.me": 4,
+    "https://lztr.me": 4,
+}
+
+SOURCE_FLAG_MAPPING = {
+    "https://redacted.sh": "RED",
+    "https://orpheus.network": "OPS",
+    "https://dicmusic.com": "DICMusic",
+    "https://libble.me": "LENNY",
+    "https://lztr.me": "LZTR",
+}
+
+
+def get_api_instance(server, cookies=None, api_key=None):
+    """Get appropriate API instance based on server address.
+
+    Args:
+        server (str): Server address.
+        cookies (optional): Optional cookies.
+        api_key (str, optional): Optional API key.
+
+    Returns:
+        GazelleBase: API instance.
+
+    Raises:
+        ValueError: If unsupported server is provided.
+    """
+    if server not in API_TYPE_MAPPING:
+        raise ValueError(f"Unsupported server: {server}")
+
+    api_class = API_TYPE_MAPPING[server]
+    interval = API_INTERVAL_MAPPING[server]
+
+    return api_class(interval=interval, cookies=cookies, api_key=api_key, server=server)

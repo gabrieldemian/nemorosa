@@ -1,5 +1,6 @@
-from colorama import Fore, Style
 import traceback
+
+from colorama import Fore, Style
 
 
 class ColorLogger:
@@ -77,4 +78,27 @@ def generate_logger(loglevel="info"):
     return ColorLogger(loglevel)
 
 
-global_loglevel = "info"
+# Global logger instance
+_current_logger = None
+
+
+def get_logger():
+    """Get current logger instance.
+
+    Returns:
+        ColorLogger: Current logger instance.
+    """
+    global _current_logger
+    if _current_logger is None:
+        _current_logger = generate_logger()
+    return _current_logger
+
+
+def set_logger(logger):
+    """Set current logger instance.
+
+    Args:
+        logger: Logger instance to set as current.
+    """
+    global _current_logger
+    _current_logger = logger

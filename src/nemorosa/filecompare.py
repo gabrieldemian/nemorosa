@@ -1,0 +1,232 @@
+import difflib
+import re
+from collections import defaultdict
+
+from . import config, logger
+
+
+class DiffResult:
+    """Store diff analysis result."""
+
+    def __init__(self, prefix: str, suffix: str):
+        self.prefix = prefix
+        self.suffix = suffix
+
+    def __str__(self):
+        return f"DiffResult(prefix='{self.prefix}', suffix='{self.suffix}')"
+
+
+def find_common_prefix(a: str, b: str) -> str:
+    """Find common prefix of two strings and remove trailing digits."""
+    min_length = min(len(a), len(b))
+    prefix = a[:min_length]
+
+    for i in range(min_length):
+        if a[i].lower() != b[i].lower():
+            prefix = a[:i]
+            break
+
+    # Remove trailing digits
+    prefix = re.sub(r"\d+$", "", prefix)
+    return prefix
+
+
+def find_common_suffix(a: str, b: str) -> str:
+    """Find common suffix of two strings, skipping ASCII letters and digits."""
+    i = 0
+    j = 0
+
+    while i < len(a) and j < len(b):
+        # Skip ASCII letters and digits
+        while i < len(a) and a[i].isascii() and (a[i].isalpha() or a[i].isdigit()):
+            i += 1
+        while j < len(b) and b[j].isascii() and (b[j].isalpha() or b[j].isdigit()):
+            j += 1
+
+        # If both are still in valid range, compare current character
+        if i < len(a) and j < len(b) and a[i].lower() == b[j].lower():
+            return a[i]
+
+        i += 1
+        j += 1
+
+    return ""
+
+
+def get_diff_result(names: list[str]) -> DiffResult | None:
+    """Analyze filename list to find common prefix and suffix patterns."""
+    names = list(set(names))  # Remove duplicates
+    if len(names) < 2:
+        return None
+
+    for i in range(len(names) - 1):
+        for j in range(len(names) - 1, i, -1):  # Start from end to avoid two names too similar
+            prefix = find_common_prefix(names[i], names[j])
+            suffix = find_common_suffix(names[i][len(prefix) :], names[j][len(prefix) :])
+
+            if prefix:  # If common prefix found
+                return DiffResult(prefix, suffix)
+
+    return None
+
+
+def extract_match_key_by_diff(diff: DiffResult | None, filename: str) -> str:
+    """Extract match key from filename based on diff analysis result."""
+    if diff is None:
+        # If no diff analysis result, use simple number matching
+        pattern = r"(\d+)(?!.*\d)"  # Match last number
+    else:
+        if not diff.suffix:
+            pattern = f"{re.escape(diff.prefix)}(\\d+)"
+        else:
+            pattern = f"{re.escape(diff.prefix)}(.+?){re.escape(diff.suffix)}"
+
+    match = re.search(pattern, filename, re.IGNORECASE)
+    if match and match.groups():
+        key = match.group(1).strip()
+        # If pure number, remove leading zeros
+        if key.isdigit():
+            key = str(int(key))
+        return key
+
+    return ""
+
+
+def calculate_file_keys(files: list[str]) -> dict:
+    """Calculate match keys for file list."""
+    result = {}
+
+    # Get filenames without extensions
+    filenames = []
+    for file in files:
+        name = file.rsplit(".", 1)[0] if "." in file else file
+        if name:
+            filenames.append(name)
+
+    if not filenames:
+        return result
+
+    # Analyze filename differences
+    diff = get_diff_result(filenames)
+
+    # Extract match key for each file
+    for file in files:
+        name = file.rsplit(".", 1)[0] if "." in file else file
+        result[file] = extract_match_key_by_diff(diff, name)
+
+    return result
+
+
+def filename_match(torrent_name: str, local_names: list[str]) -> str | None:
+    """Use pattern-based algorithm to match filenames, replacing simple similarity comparison."""
+    if not local_names:
+        return None
+
+    if len(local_names) == 1:
+        return local_names[0]
+
+    # Calculate match keys for all files
+    all_files = [torrent_name] + local_names
+    file_keys = calculate_file_keys(all_files)
+
+    torrent_key = file_keys.get(torrent_name, "")
+
+    # If torrent file has key, try to match local files with same key
+    if torrent_key:
+        for local_name in local_names:
+            local_key = file_keys.get(local_name, "")
+            if local_key == torrent_key:
+                return local_name
+
+    # If no key match, fallback to similarity comparison
+    best_match = None
+    best_similarity = -1
+
+    for local_name in local_names:
+        similarity = difflib.SequenceMatcher(None, local_name, torrent_name).ratio()
+        if similarity > best_similarity:
+            best_similarity = similarity
+            best_match = local_name
+
+    return best_match
+
+
+def check_conflicts(fdict_local, fdict_torrent):
+    """Detect conflicts of same-name files with different sizes.
+
+    Args:
+        fdict_local (dict): Local file dictionary.
+        fdict_torrent (dict): Torrent file dictionary.
+
+    Returns:
+        bool: True if conflicts exist, False otherwise.
+    """
+    for name, size in fdict_torrent.items():
+        if name in fdict_local and fdict_local[name] != size:
+            logger.ColorLogger(loglevel=config.cfg.global_config.loglevel).error(
+                f"File conflict detected! File: {name}, Local size: {fdict_local[name]}, Torrent size: {size}"
+            )
+            return True
+    return False
+
+
+def generate_rename_map(fdict_local, fdict_torrent):
+    """Generate rename mapping from fdict_local to fdict_torrent.
+
+    Args:
+        fdict_local (dict): Local file dictionary.
+        fdict_torrent (dict): Torrent file dictionary.
+
+    Returns:
+        dict: Rename mapping dictionary, format like {"1.flac": "1-1.flac", "2.flac": "1-2.flac"}.
+    """
+    # Step 1: Create remaining file dictionary (remove same-name files)
+    remaining_local = fdict_local.copy()
+    remaining_torrent = fdict_torrent.copy()
+
+    # Remove same-name files (regardless of size)
+    for name in fdict_torrent:
+        if name in fdict_local:
+            del remaining_local[name]
+            del remaining_torrent[name]
+
+    # Group local files by file size
+    size_map_local = defaultdict(list)
+    for name, size in remaining_local.items():
+        size_map_local[size].append(name)
+
+    # Initialize rename mapping
+    rename_map = {}
+
+    # Traverse torrent file dictionary
+    for torrent_name, torrent_size in list(remaining_torrent.items()):
+        # Check if there are local files with same size
+        if torrent_size in size_map_local:
+            local_names = size_map_local[torrent_size]
+
+            if len(local_names) == 1:
+                # Unique match: directly establish mapping
+                local_name = local_names[0]
+                rename_map[torrent_name] = local_name
+
+                # Remove matched files
+                del remaining_torrent[torrent_name]
+                del size_map_local[torrent_size]  # Entire size group matched
+
+            elif len(local_names) > 1:
+                # Multiple files with same size: use pattern-based filename matching
+                best_match = filename_match(torrent_name, local_names)
+
+                # If match found
+                if best_match:
+                    rename_map[torrent_name] = best_match
+
+                    # Remove matched files
+                    del remaining_torrent[torrent_name]
+                    size_map_local[torrent_size].remove(best_match)
+
+                    # If this size group is empty, remove entire group
+                    if not size_map_local[torrent_size]:
+                        del size_map_local[torrent_size]
+
+    return rename_map
