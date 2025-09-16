@@ -130,6 +130,7 @@ def scan(
     torrent_client: TorrentClient,
     GLOBAL,
     target_site_info=None,
+    torrent_object: torf.Torrent | None = None,
 ):
     """Scan for matching torrent files.
 
@@ -143,6 +144,7 @@ def scan(
         torrent_client (TorrentClient): Torrent client instance.
         GLOBAL (dict): Global statistics dictionary.
         target_site_info (dict, optional): Target site information.
+        torrent_object (torf.Torrent, optional): Original torrent object for hash search.
 
     Returns:
         tuple: (torrent_id, downloaded) - torrent ID and download success status.
@@ -151,147 +153,196 @@ def scan(
     GLOBAL["scanned"] += 1
 
     tid = -1
-    # search for the files with top 5 longest name
-    scan_querys = []
-    max_fnames = sorted(fdict.keys(), key=lambda fname: len(fname), reverse=True)
-    for index, fname in enumerate(max_fnames):
-        if index == 0 or posixpath.splitext(fname)[1] in [
-            ".flac",
-            ".mp3",
-            ".dsf",
-            ".dff",
-            ".m4a",
-        ]:
-            scan_querys.append(fname)
-        if len(scan_querys) >= 5:
-            break
 
-    for fname in scan_querys:
-        app_logger.debug(f"Searching for file: {fname}")
-        fname_query = fname
+    # Try hash-based search first if torrent object is available
+    if torrent_object:
+        app_logger.debug("Trying hash-based search first")
         try:
-            torrents = api.search_torrent_by_filename(fname_query)
-        except Exception as e:
-            app_logger.error(f"Error searching for file '{fname_query}': {e}")
-            continue
+            # Get target source flag from API
+            target_source_flag = api.source_flag
 
-        # Record the number of results found
-        app_logger.debug(f"Found {len(torrents)} potential matches for file '{fname_query}'")
+            source_flags = [target_source_flag, ""]
 
-        # If no results found and it's a music file, try fallback search using filename tail
-        if len(torrents) == 0 and posixpath.splitext(fname)[1] in [
-            ".flac",
-            ".mp3",
-            ".dsf",
-            ".dff",
-            ".m4a",
-        ]:
-            fname_query = make_filename_query(fname)
-            if fname_query != fname:
-                app_logger.debug(
-                    f"No results found for '{fname}', trying fallback search with basename: '{fname_query}'"
-                )
+            # Define possible source flags for the target tracker
+            # This should match the logic in fertilizer
+            if target_source_flag == "RED":
+                source_flags.append("PTH")
+            elif target_source_flag == "OPS":
+                source_flags.append("APL")
+
+            # Create a copy of the torrent and try different source flags
+            for flag in source_flags:
                 try:
-                    fallback_torrents = api.search_torrent_by_filename(fname_query)
-                    if fallback_torrents:
-                        torrents = fallback_torrents
-                        app_logger.debug(f"Fallback search found {len(torrents)} potential matches for '{fname_query}'")
-                    else:
-                        app_logger.debug(f"Fallback search also found no results for '{fname_query}'")
-                except Exception as e:
-                    app_logger.error(f"Error in fallback search for file basename '{fname_query}': {e}")
+                    torrent_object.source = flag
 
-        # Match by total size
-        size_match_found = False
-        for t in torrents:
-            if tsize == t["size"]:
-                tid = t["torrentId"]
-                size_match_found = True
-                app_logger.success(f"Size match found! Torrent ID: {tid} (Size: {tsize})")
+                    # Calculate hash
+                    torrent_hash = torrent_object.infohash
+
+                    # Search torrent by hash
+                    search_result = api.search_torrent_by_hash(torrent_hash)
+                    if search_result:
+                        app_logger.success(f"Found torrent by hash! Hash: {torrent_hash}")
+
+                        # Get torrent ID from search result
+                        torrent_id = search_result["response"]["torrent"]["id"]
+                        if torrent_id:
+                            tid = int(torrent_id)
+                            app_logger.success(f"Found match! Torrent ID: {tid}")
+                            # Found via hash search, skip to injection logic
+                            break
+                except Exception as e:
+                    logger.get_logger().debug(f"Error calculating hash for source '{flag}': {e}")
+                    continue
+
+        except Exception as e:
+            app_logger.debug(f"Hash search failed: {e}")
+
+    # If hash search didn't find anything, try filename search
+    if tid == -1:
+        app_logger.debug("Hash search failed or not available, falling back to filename search")
+        # search for the files with top 5 longest name
+        scan_querys = []
+        max_fnames = sorted(fdict.keys(), key=lambda fname: len(fname), reverse=True)
+        for index, fname in enumerate(max_fnames):
+            if index == 0 or posixpath.splitext(fname)[1] in [
+                ".flac",
+                ".mp3",
+                ".dsf",
+                ".dff",
+                ".m4a",
+            ]:
+                scan_querys.append(fname)
+            if len(scan_querys) >= 5:
                 break
 
-        if size_match_found:
-            break
+        for fname in scan_querys:
+            app_logger.debug(f"Searching for file: {fname}")
+            fname_query = fname
+            try:
+                torrents = api.search_torrent_by_filename(fname_query)
+            except Exception as e:
+                app_logger.error(f"Error searching for file '{fname_query}': {e}")
+                continue
 
-        # Handle cases with too many results
-        if len(torrents) > 20:
-            app_logger.warning(f"Too many results found for file '{fname_query}' ({len(torrents)}). Skipping.")
-            continue
+            # Record the number of results found
+            app_logger.debug(f"Found {len(torrents)} potential matches for file '{fname_query}'")
 
-        # Match by file content
-        if tid == -1:
-            app_logger.debug(f"No size match found. Checking file contents for '{fname_query}'")
-            for t_index, t in enumerate(torrents, 1):
-                app_logger.debug(f"Checking torrent #{t_index}/{len(torrents)}: ID {t['torrentId']}")
-
-                resp = api.torrent(t["torrentId"])
-                resp_files = resp.get("fileList", {})
-
-                # Get files in fileList corresponding to fname_query
-                fname_query_words = fname_query.split()
-                matching_keys = []
-
-                if fname_query == fname:
-                    matching_keys.append(fname_query)
-                else:
-                    # Check all keys in resp_files
-                    for key in resp_files:
-                        # Check if all words in fname_query are in key
-                        if all(word in key for word in fname_query_words):
-                            matching_keys.append(key)
-
+            # If no results found and it's a music file, try fallback search using filename tail
+            if len(torrents) == 0 and posixpath.splitext(fname)[1] in [
+                ".flac",
+                ".mp3",
+                ".dsf",
+                ".dff",
+                ".m4a",
+            ]:
+                fname_query = make_filename_query(fname)
+                if fname_query != fname:
                     app_logger.debug(
-                        f"Found {len(matching_keys)} files matching query '{fname_query}': "
-                        f"{matching_keys[:3]}{'...' if len(matching_keys) > 3 else ''}"
+                        f"No results found for '{fname}', trying fallback search with basename: '{fname_query}'"
                     )
-
-                # Check if collected matching keys have file matches
-                matched = False
-                for matching_key in matching_keys:
-                    # Check if this key is in our file dictionary and size matches
-                    if resp_files.get(matching_key, 0) == fdict[fname]:
-                        app_logger.debug(f"File size match found for key: {matching_key}")
-
-                        # If it's a music file, match directly
-                        if posixpath.splitext(matching_key)[1] in [
-                            ".flac",
-                            ".mp3",
-                            ".dsf",
-                            ".dff",
-                            ".m4a",
-                        ]:
-                            tid = t["torrentId"]
-                            matched = True
-                            app_logger.success(f"Music file match found! Torrent ID: {tid} (File: {matching_key})")
-                            break  # Break out of matching_keys loop
+                    try:
+                        fallback_torrents = api.search_torrent_by_filename(fname_query)
+                        if fallback_torrents:
+                            torrents = fallback_torrents
+                            app_logger.debug(
+                                f"Fallback search found {len(torrents)} potential matches for '{fname_query}'"
+                            )
                         else:
-                            # For non-music files, still need to check music files
-                            check_music_file = scan_querys[-1]
-                            if resp_files.get(check_music_file, 0) == fdict.get(check_music_file, 0):
+                            app_logger.debug(f"Fallback search also found no results for '{fname_query}'")
+                    except Exception as e:
+                        app_logger.error(f"Error in fallback search for file basename '{fname_query}': {e}")
+
+            # Match by total size
+            size_match_found = False
+            for t in torrents:
+                if tsize == t["size"]:
+                    tid = t["torrentId"]
+                    size_match_found = True
+                    app_logger.success(f"Size match found! Torrent ID: {tid} (Size: {tsize})")
+                    break
+
+            if size_match_found:
+                break
+
+            # Handle cases with too many results
+            if len(torrents) > 20:
+                app_logger.warning(f"Too many results found for file '{fname_query}' ({len(torrents)}). Skipping.")
+                continue
+
+            # Match by file content
+            if tid == -1:
+                app_logger.debug(f"No size match found. Checking file contents for '{fname_query}'")
+                for t_index, t in enumerate(torrents, 1):
+                    app_logger.debug(f"Checking torrent #{t_index}/{len(torrents)}: ID {t['torrentId']}")
+
+                    resp = api.torrent(t["torrentId"])
+                    resp_files = resp.get("fileList", {})
+
+                    # Get files in fileList corresponding to fname_query
+                    fname_query_words = fname_query.split()
+                    matching_keys = []
+
+                    if fname_query == fname:
+                        matching_keys.append(fname_query)
+                    else:
+                        # Check all keys in resp_files
+                        for key in resp_files:
+                            # Check if all words in fname_query are in key
+                            if all(word in key for word in fname_query_words):
+                                matching_keys.append(key)
+
+                        app_logger.debug(
+                            f"Found {len(matching_keys)} files matching query '{fname_query}': "
+                            f"{matching_keys[:3]}{'...' if len(matching_keys) > 3 else ''}"
+                        )
+
+                    # Check if collected matching keys have file matches
+                    matched = False
+                    for matching_key in matching_keys:
+                        # Check if this key is in our file dictionary and size matches
+                        if resp_files.get(matching_key, 0) == fdict[fname]:
+                            app_logger.debug(f"File size match found for key: {matching_key}")
+
+                            # If it's a music file, match directly
+                            if posixpath.splitext(matching_key)[1] in [
+                                ".flac",
+                                ".mp3",
+                                ".dsf",
+                                ".dff",
+                                ".m4a",
+                            ]:
                                 tid = t["torrentId"]
                                 matched = True
-                                app_logger.success(f"File match found! Torrent ID: {tid} (File: {matching_key})")
+                                app_logger.success(f"Music file match found! Torrent ID: {tid} (File: {matching_key})")
                                 break  # Break out of matching_keys loop
-
-                if matched:
-                    # Check file conflicts
-                    if filecompare.check_conflicts(fdict, resp_files):
-                        app_logger.debug("Conflict detected. Skipping this torrent.")
-                        tid = -1  # Reset tid
-                        matched = False
+                            else:
+                                # For non-music files, still need to check music files
+                                check_music_file = scan_querys[-1]
+                                if resp_files.get(check_music_file, 0) == fdict.get(check_music_file, 0):
+                                    tid = t["torrentId"]
+                                    matched = True
+                                    app_logger.success(f"File match found! Torrent ID: {tid} (File: {matching_key})")
+                                    break  # Break out of matching_keys loop
 
                     if matched:
-                        break  # Break out of torrent traversal loop
+                        # Check file conflicts
+                        if filecompare.check_conflicts(fdict, resp_files):
+                            app_logger.debug("Conflict detected. Skipping this torrent.")
+                            tid = -1  # Reset tid
+                            matched = False
 
-        # If match found, exit early
-        if tid != -1:
-            app_logger.debug(f"Match found with file '{fname}'. Stopping search.")
-            break
+                        if matched:
+                            break  # Break out of torrent traversal loop
 
-        app_logger.debug(f"No more results for file '{fname}'")
-        if posixpath.splitext(fname)[1] in [".flac", ".mp3", ".dsf", ".dff", ".m4a"]:
-            app_logger.debug("Stopping search as music file match is not found")
-            break
+            # If match found, exit early
+            if tid != -1:
+                app_logger.debug(f"Match found with file '{fname}'. Stopping search.")
+                break
+
+            app_logger.debug(f"No more results for file '{fname}'")
+            if posixpath.splitext(fname)[1] in [".flac", ".mp3", ".dsf", ".dff", ".m4a"]:
+                app_logger.debug("Stopping search as music file match is not found")
+                break
 
     if tid == -1:
         app_logger.header("No matching torrent found")
@@ -306,9 +357,12 @@ def scan(
     else:
         GLOBAL["found"] += 1
         app_logger.success(f"Found match! Torrent ID: {tid}")
-        torrent_data = api.download_torrent(tid)
 
-        torrent_object = torf.Torrent.read_stream(torrent_data)
+        # If found via hash search, use the original torrent object
+        # Otherwise, download the torrent data
+        if not torrent_object:
+            torrent_data = api.download_torrent(tid)
+            torrent_object = torf.Torrent.read_stream(torrent_data)
         fdict_torrent = {}
         for f in torrent_object.files:
             fdict_torrent["/".join(f.parts[1:])] = f.size
@@ -400,6 +454,12 @@ def process_torrents(
             tsize = torrent_details["total_size"]
             fdict = {posixpath.relpath(f["name"], torrent_name): f["length"] for f in torrent_details["files"]}
 
+            # Try to get torrent data from torrent client for hash search
+            torrent_object = None
+            # Get torrent hash from torrent details
+            torrent_hash = torrent_details["hash"]
+            torrent_object = torrent_client.get_torrent_object(torrent_hash)
+
             # Scan and match for each target site
             any_success = False
             existing_target_trackers = set(torrent_details.get("existing_target_trackers", []))
@@ -424,6 +484,7 @@ def process_torrents(
                         torrent_client=torrent_client,
                         GLOBAL=GLOBAL,
                         target_site_info=api_info,  # Pass site info for recording
+                        torrent_object=torrent_object,  # Pass torrent object for hash search
                     )
 
                     if tid != -1:

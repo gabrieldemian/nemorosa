@@ -22,9 +22,7 @@ class GlobalConfig(msgspec.Struct):
     loglevel: str = "info"
     no_download: bool = False
     exclude_mp3: bool = True
-    check_trackers: list[str] = msgspec.field(
-        default_factory=lambda: ["flacsfor.me", "home.opsfet.ch", "52dic.vip", "open.cd", "daydream.dmhy.best"]
-    )
+    check_trackers: list[str] = msgspec.field(default_factory=lambda: ["flacsfor.me", "home.opsfet.ch", "52dic.vip"])
 
     def __post_init__(self):
         # Validate log level
@@ -220,7 +218,7 @@ def create_default_config(target_path: str | None = None) -> str:
             "loglevel": "info",
             "no_download": False,
             "exclude_mp3": True,
-            "check_trackers": ["flacsfor.me", "home.opsfet.ch", "52dic.vip", "open.cd", "daydream.dmhy.best"],
+            "check_trackers": ["flacsfor.me", "home.opsfet.ch", "52dic.vip"],
         },
         "downloader": {"client": "transmission+http://user:pass@localhost:9091/transmission/rpc", "label": "nemorosa"},
         "target_site": [

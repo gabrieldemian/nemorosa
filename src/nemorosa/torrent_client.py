@@ -11,7 +11,7 @@ import posixpath
 import time
 from abc import ABC, abstractmethod
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 import deluge_client
 import qbittorrentapi
@@ -293,7 +293,7 @@ class TorrentClient(ABC):
         pass
 
     @abstractmethod
-    def _process_rename_map(self, torrent_id: str, base_path: str, rename_map: dict) -> dict:
+    def _process_rename_map(self, torrent_id: Any, base_path: str, rename_map: dict) -> dict:
         """Process rename mapping to adapt to specific torrent client.
 
         Args:
@@ -306,6 +306,37 @@ class TorrentClient(ABC):
         """
         pass
 
+    def get_torrent_object(self, torrent_hash: str) -> "torf.Torrent | None":
+        """Get torrent object from client by hash.
+
+        Args:
+            torrent_hash (str): Torrent hash.
+
+        Returns:
+            torf.Torrent | None: Torrent object, or None if not available.
+        """
+        try:
+            torrent_data = self._get_torrent_data_by_hash(torrent_hash)
+            if torrent_data:
+                return torf.Torrent.read_stream(torrent_data)
+            return None
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Error getting torrent object for hash {torrent_hash}: {e}")
+            return None
+
+    @abstractmethod
+    def _get_torrent_data_by_hash(self, torrent_hash: str) -> bytes | None:
+        """Get torrent data from client by hash - subclasses must implement.
+
+        Args:
+            torrent_hash (str): Torrent hash.
+
+        Returns:
+            bytes | None: Torrent file data, or None if not available.
+        """
+        pass
+
 
 class TransmissionClient(TorrentClient):
     """Transmission torrent client implementation."""
@@ -313,6 +344,7 @@ class TransmissionClient(TorrentClient):
     def __init__(self, url: str):
         super().__init__()
         parsed = parse_libtc_url(url)
+        self.torrents_dir = parsed.get("torrents_dir", "/config/torrents")
         self.client = transmission_rpc.Client(
             host=parsed.get("host", "localhost"),
             port=parsed.get("port", 9091),
@@ -395,7 +427,7 @@ class TransmissionClient(TorrentClient):
         torrent = self.client.get_torrent(torrent_id)
         return any(target_tracker in url for url in torrent.tracker_list)
 
-    def _process_rename_map(self, torrent_id: str, base_path: str, rename_map: dict) -> dict:
+    def _process_rename_map(self, torrent_id: int, base_path: str, rename_map: dict) -> dict:
         """Process rename mapping to adapt to Transmission."""
         transmission_map = {}
         temp_map = {}
@@ -412,6 +444,17 @@ class TransmissionClient(TorrentClient):
             transmission_map[posixpath.join(base_path, key)] = value
 
         return transmission_map
+
+    def _get_torrent_data_by_hash(self, torrent_hash: str) -> bytes | None:
+        """Get torrent data from Transmission by hash."""
+        try:
+            torrent_path = posixpath.join(self.torrents_dir, torrent_hash + ".torrent")
+            with open(torrent_path, "rb") as f:
+                return f.read()
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Error getting torrent data from Transmission: {e}")
+            return None
 
 
 class QBittorrentClient(TorrentClient):
@@ -510,6 +553,16 @@ class QBittorrentClient(TorrentClient):
             new_rename_map[posixpath.join(base_path, key)] = posixpath.join(base_path, value)
         return new_rename_map
 
+    def _get_torrent_data_by_hash(self, torrent_hash: str) -> bytes | None:
+        """Get torrent data from qBittorrent by hash."""
+        try:
+            torrent_data = self.client.torrents_export(torrent_hash=torrent_hash)
+            return torrent_data
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Error getting torrent data from qBittorrent: {e}")
+            return None
+
 
 class DelugeClient(TorrentClient):
     """Deluge torrent client implementation."""
@@ -517,6 +570,7 @@ class DelugeClient(TorrentClient):
     def __init__(self, url: str):
         super().__init__()
         parsed = parse_libtc_url(url)
+        self.torrents_dir = parsed.get("torrents_dir", "")
         self.client = deluge_client.DelugeRPCClient(
             host=parsed.get("host", "localhost"),
             port=parsed.get("port", 58846),
@@ -634,10 +688,21 @@ class DelugeClient(TorrentClient):
                 new_rename_map[file["index"]] = posixpath.join(base_path, rename_map[relpath])
         return new_rename_map
 
+    def _get_torrent_data_by_hash(self, torrent_hash: str) -> bytes | None:
+        """Get torrent data from Deluge by hash."""
+        try:
+            torrent_path = posixpath.join(self.torrents_dir, torrent_hash + ".torrent")
+            with open(torrent_path, "rb") as f:
+                return f.read()
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Error getting torrent data from Deluge: {e}")
+            return None
+
 
 def parse_libtc_url(url):
     """Parse torrent client URL and extract connection parameters"""
-    # transmission+http://127.0.0.1:9091
+    # transmission+http://127.0.0.1:9091/?torrents_dir=/path
     # rutorrent+http://RUTORRENT_ADDRESS:9380/plugins/rpc/rpc.php
     # deluge://username:password@127.0.0.1:58664
     # qbittorrent+http://username:password@127.0.0.1:8080
@@ -660,6 +725,8 @@ def parse_libtc_url(url):
         kwargs["scheme"] = scheme[-1]
         kwargs["host"], kwargs["port"] = netloc.split(":")
         kwargs["port"] = int(kwargs["port"])
+
+    kwargs.update(dict(parse_qsl(parsed.query)))
 
     return kwargs
 

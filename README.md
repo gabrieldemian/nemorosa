@@ -66,8 +66,6 @@ global:
     - flacsfor.me
     - home.opsfet.ch
     - 52dic.vip
-    - open.cd
-    - daydream.dmhy.best
 
 # Torrent client configuration
 downloader:
@@ -88,9 +86,9 @@ target_site:
 
 Supported torrent client URL formats:
 
-- **Transmission**: `transmission+http://username:password@host:port/transmission/rpc`
+- **Transmission**: `transmission+http://username:password@host:port/?torrents_dir=/path`
 - **qBittorrent**: `qbittorrent+http://username:password@host:port`
-- **Deluge**: `deluge://username:password@host:port`
+- **Deluge**: `deluge://username:password@host:port/?torrents_dir=/path`
 
 ### Authentication
 

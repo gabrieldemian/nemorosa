@@ -35,6 +35,8 @@ class GazelleBase:
         self.last_request_time = 0
         self.interval = interval + 0.1  # seconds between requests
         self.logger = logger.ColorLogger(loglevel=config.cfg.global_config.loglevel)
+        # Set source flag based on server
+        self.source_flag = SOURCE_FLAG_MAPPING.get(server, "")
 
     def wait(self):
         """Ensure request interval time."""
@@ -194,6 +196,77 @@ class GazelleBase:
         """
         raise NotImplementedError("Subclasses must implement search_torrent_by_filename")
 
+    def search_torrent_by_hash(self, torrent_hash):
+        """Search torrent by hash - subclasses must implement specific logic.
+
+        Args:
+            torrent_hash (str): Torrent hash to search for.
+
+        Returns:
+            dict: Search result with torrent information, or None if not found.
+
+        Raises:
+            NotImplementedError: Always raised for base class.
+        """
+        raise NotImplementedError("Subclasses must implement search_torrent_by_hash")
+
+    def ajax(self, action, **kwargs):
+        """Make an AJAX request at a given action page.
+
+        Args:
+            action (str): The action to perform.
+            **kwargs: Additional parameters for the request.
+
+        Returns:
+            dict: JSON response from the server.
+
+        Raises:
+            RequestException: If the request fails.
+        """
+        ajaxpage = self.server + "/ajax.php"
+        params = {"action": action}
+        if self.authkey:
+            params["auth"] = self.authkey
+        params.update(kwargs)
+
+        self.wait()  # Respect rate limit
+
+        r = self.session.get(ajaxpage, params=params, allow_redirects=False)
+        try:
+            json_response = r.json()
+            if json_response["status"] != "success":
+                raise RequestException
+            return json_response
+        except ValueError as e:
+            raise RequestException from e
+
+    def request(self, url, params=None, method="GET", data=None):
+        """Send HTTP request and return response.
+
+        Args:
+            url (str): Request URL.
+            params (dict, optional): Query parameters.
+            method (str): HTTP method. Defaults to "GET".
+            data (dict, optional): Request body data.
+
+        Returns:
+            requests.Response: HTTP response object.
+
+        Raises:
+            ValueError: If unsupported HTTP method is used.
+        """
+        self.wait()
+        full_url = urljoin(self.server, url)
+
+        if method == "GET":
+            response = self.session.get(full_url, params=params)
+        elif method == "POST":
+            response = self.session.post(full_url, data=data, params=params)
+        else:
+            raise ValueError("Unsupported HTTP method")
+
+        return response
+
     def _check_and_modify_source_flag(self, torrent_content: bytes) -> bytes:
         """Check and modify the source flag of a torrent.
 
@@ -257,7 +330,7 @@ class GazelleJSONAPI(GazelleBase):
         Raises:
             RequestException: If authentication fails.
         """
-        accountinfo = self.request("index")
+        accountinfo = self.ajax("index")
         self.authkey = accountinfo["response"]["authkey"]
         self.passkey = accountinfo["response"]["passkey"]
 
@@ -266,36 +339,6 @@ class GazelleJSONAPI(GazelleBase):
         logoutpage = self.server + "/logout.php"
         params = {"auth": self.authkey}
         self.session.get(logoutpage, params=params, allow_redirects=False)
-
-    def request(self, action, **kwargs):
-        """Make an AJAX request at a given action page.
-
-        Args:
-            action (str): The action to perform.
-            **kwargs: Additional parameters for the request.
-
-        Returns:
-            dict: JSON response from the server.
-
-        Raises:
-            RequestException: If the request fails.
-        """
-        ajaxpage = self.server + "/ajax.php"
-        params = {"action": action}
-        if self.authkey:
-            params["auth"] = self.authkey
-        params.update(kwargs)
-
-        self.wait()  # Respect rate limit
-
-        r = self.session.get(ajaxpage, params=params, allow_redirects=False)
-        try:
-            json_response = r.json()
-            if json_response["status"] != "success":
-                raise RequestException
-            return json_response
-        except ValueError as e:
-            raise RequestException from e
 
     def _get_torrent_data(self, torrent_id):
         """Implement the base class abstract method.
@@ -306,12 +349,12 @@ class GazelleJSONAPI(GazelleBase):
         Returns:
             dict: Response data from the torrent API.
         """
-        return self.request("torrent", id=torrent_id)
+        return self.ajax("torrent", id=torrent_id)
 
     def search_torrent_by_filename(self, filename):
         params = {"filelist": filename}
         try:
-            response = self.request("browse", **params)
+            response = self.ajax("browse", **params)
             # Log API response status
             if response.get("status") != "success":
                 self.logger.warning(f"API failure for file '{filename}': {json.dumps(response, ensure_ascii=False)}")
@@ -329,6 +372,29 @@ class GazelleJSONAPI(GazelleBase):
         except Exception as e:
             self.logger.error(f"Error searching for torrent by filename '{filename}': {e}")
             return []
+
+    def search_torrent_by_hash(self, torrent_hash):
+        """Search torrent by hash using the torrent API.
+
+        Args:
+            torrent_hash (str): Torrent hash to search for.
+
+        Returns:
+            dict: Search result with torrent information, or None if not found.
+        """
+        try:
+            response = self.ajax("torrent", hash=torrent_hash)
+            if response.get("status") == "success":
+                self.logger.debug(f"Hash search successful for hash '{torrent_hash}'")
+                return response
+            else:
+                self.logger.debug(
+                    f"Hash search failed for hash '{torrent_hash}': {response.get('error', 'Unknown error')}"
+                )
+                return None
+        except Exception as e:
+            self.logger.error(f"Error searching for torrent by hash '{torrent_hash}': {e}")
+            return None
 
     def _download_torrent_response(self, torrent_id):
         """Implement the base class abstract method - get download torrent response.
@@ -357,33 +423,6 @@ class GazelleParser(GazelleBase):
         else:
             self.logger.warning("No cookies provided")
 
-    def request(self, url, params=None, method="GET", data=None):
-        """Send HTTP request and return response.
-
-        Args:
-            url (str): Request URL.
-            params (dict, optional): Query parameters.
-            method (str): HTTP method. Defaults to "GET".
-            data (dict, optional): Request body data.
-
-        Returns:
-            requests.Response: HTTP response object.
-
-        Raises:
-            ValueError: If unsupported HTTP method is used.
-        """
-        self.wait()
-        full_url = urljoin(self.server, url)
-
-        if method == "GET":
-            response = self.session.get(full_url, params=params)
-        elif method == "POST":
-            response = self.session.post(full_url, data=data, params=params)
-        else:
-            raise ValueError("Unsupported HTTP method")
-
-        return response
-
     def search_torrent_by_filename(self, filename):
         """Execute search and return torrent list.
 
@@ -397,6 +436,29 @@ class GazelleParser(GazelleBase):
 
         response = self.request("torrents.php", params=params)
         return self.parse_search_results(response.text)
+
+    def search_torrent_by_hash(self, torrent_hash):
+        """Search torrent by hash using the torrent API.
+
+        Args:
+            torrent_hash (str): Torrent hash to search for.
+
+        Returns:
+            dict: Search result with torrent information, or None if not found.
+        """
+        try:
+            response = self.ajax("torrent", hash=torrent_hash)
+            if response.get("status") == "success":
+                self.logger.debug(f"Hash search successful for hash '{torrent_hash}'")
+                return response
+            else:
+                self.logger.debug(
+                    f"Hash search failed for hash '{torrent_hash}': {response.get('error', 'Unknown error')}"
+                )
+                return None
+        except Exception as e:
+            self.logger.error(f"Error searching for torrent by hash '{torrent_hash}': {e}")
+            return None
 
     def parse_search_results(self, html):
         """Parse search results page.
@@ -483,9 +545,7 @@ class GazelleParser(GazelleBase):
         Returns:
             dict: Response data from the torrent API.
         """
-        params = {"action": "torrent", "id": torrent_id}
-        response = self.request("ajax.php", params=params)
-        return response.json()
+        return self.ajax("torrent", id=torrent_id)
 
     def _download_torrent_response(self, torrent_id):
         """Implement the base class abstract method - get download torrent response.
