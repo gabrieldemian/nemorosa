@@ -25,7 +25,6 @@ class TorrentClient(ABC):
     """Abstract base class for torrent clients."""
 
     def __init__(self):
-        self.torrents_cache = {}
         self.logger = None  # Will be set by the main application
 
     def set_logger(self, logger):
@@ -45,6 +44,86 @@ class TorrentClient(ABC):
         """
         pass
 
+    def get_single_torrent(self, infohash: str, target_trackers: list[str]) -> dict[str, Any] | None:
+        """Get single torrent by infohash with existing trackers information.
+
+        This method follows the same logic as get_filtered_torrents but for a single torrent.
+        It finds the torrent by infohash and determines which target trackers this content
+        already exists on by checking all torrents with the same content name.
+
+        Args:
+            infohash (str): Torrent infohash.
+            target_trackers (list[str]): List of target tracker names.
+
+        Returns:
+            dict[str, Any] | None: Torrent information with existing_trackers, or None if not found.
+        """
+        try:
+            # Get all torrents
+            torrents = list(self.get_torrents())
+
+            # Find torrent by infohash
+            target_torrent = None
+            for torrent in torrents:
+                if torrent.get("hash") == infohash:
+                    target_torrent = torrent
+                    break
+
+            if not target_torrent:
+                return None
+
+            # Check if torrent meets basic conditions (same as get_filtered_torrents)
+            check_trackers_list = config.cfg.global_config.check_trackers
+            if check_trackers_list and not any(
+                any(check_str in url for check_str in check_trackers_list) for url in target_torrent["trackers"]
+            ):
+                return None
+
+            # Filter MP3 files (based on configuration)
+            if config.cfg.global_config.exclude_mp3:
+                has_mp3 = any(posixpath.splitext(file["name"])[1].lower() == ".mp3" for file in target_torrent["files"])
+                if has_mp3:
+                    return None
+
+            # Check if torrent contains music files (if check_music_only is enabled)
+            if config.cfg.global_config.check_music_only:
+                music_extensions = [".flac", ".mp3", ".dsf", ".dff", ".m4a"]
+                has_music = any(
+                    posixpath.splitext(file["name"])[1].lower() in music_extensions for file in target_torrent["files"]
+                )
+                if not has_music:
+                    return None
+
+            # Get content name and find all torrents with the same content name
+            content_name = target_torrent["name"]
+
+            # Collect which target trackers this content already exists on
+            # (by checking all torrents with the same content name)
+            existing_trackers = set()
+            for torrent in torrents:
+                if torrent["name"] == content_name:
+                    for tracker_url in torrent["trackers"]:
+                        for target_tracker in target_trackers:
+                            if target_tracker in tracker_url:
+                                existing_trackers.add(target_tracker)
+
+            # Return torrent info with existing_trackers
+            return {
+                "hash": target_torrent["hash"],
+                "name": target_torrent["name"],
+                "percent_done": target_torrent["percent_done"],
+                "total_size": target_torrent["total_size"],
+                "files": target_torrent["files"],
+                "trackers": target_torrent["trackers"],
+                "download_dir": target_torrent["download_dir"],
+                "existing_target_trackers": list(existing_trackers),
+            }
+
+        except Exception as e:
+            if self.logger:
+                self.logger.error("Error retrieving single torrent: %s", e)
+            return None
+
     def get_filtered_torrents(self, target_trackers: list[str]) -> dict[str, dict]:
         """Get filtered torrent list.
 
@@ -62,11 +141,8 @@ class TorrentClient(ABC):
             dict[str, dict]: Dictionary mapping torrent name to torrent info.
         """
         try:
-            # Get all torrents (use cache to improve performance)
-            if not self.torrents_cache:
-                self.torrents_cache = {t["id"]: t for t in self.get_torrents()}
-
-            torrents = list(self.torrents_cache.values())
+            # Get all torrents
+            torrents = list(self.get_torrents())
 
             # Step 1: Group by content name, collect which trackers each content exists on
             content_tracker_mapping = {}  # {content_name: set(trackers)}
@@ -75,13 +151,24 @@ class TorrentClient(ABC):
             for torrent in torrents:
                 # Only process torrents that meet CHECK_TRACKERS conditions
                 check_trackers_list = config.cfg.global_config.check_trackers
-                if not any(any(check_str in url for check_str in check_trackers_list) for url in torrent["trackers"]):
+                if check_trackers_list and not any(
+                    any(check_str in url for check_str in check_trackers_list) for url in torrent["trackers"]
+                ):
                     continue
 
                 # Filter MP3 files (based on configuration)
                 if config.cfg.global_config.exclude_mp3:
                     has_mp3 = any(posixpath.splitext(file["name"])[1].lower() == ".mp3" for file in torrent["files"])
                     if has_mp3:
+                        continue
+
+                # Check if torrent contains music files (if check_music_only is enabled)
+                if config.cfg.global_config.check_music_only:
+                    music_extensions = [".flac", ".mp3", ".dsf", ".dff", ".m4a"]
+                    has_music = any(
+                        posixpath.splitext(file["name"])[1].lower() in music_extensions for file in torrent["files"]
+                    )
+                    if not has_music:
                         continue
 
                 content_name = torrent["name"]

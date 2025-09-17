@@ -8,8 +8,9 @@ import requests.cookies
 from colorama import init
 
 from . import api, config, db, logger
-from .core import process_torrents, retry_undownloaded_torrents
+from .core import process_single_torrent, process_torrents, retry_undownloaded_torrents
 from .torrent_client import create_torrent_client
+from .webserver import run_webserver
 
 
 class CustomHelpFormatter(argparse.HelpFormatter):
@@ -74,6 +75,37 @@ def setup_argument_parser(config_defaults):
         action="store_true",
         default=False,
         help="retry downloading torrents from undownloaded_torrents table",
+    )
+
+    # server mode option
+    parser.add_argument(
+        "-s",
+        "--server",
+        action="store_true",
+        default=False,
+        help="start nemorosa in server mode",
+    )
+
+    # single torrent option
+    parser.add_argument(
+        "-t",
+        "--torrent",
+        type=str,
+        help="process a single torrent by infohash",
+    )
+
+    # server options
+    server_group = parser.add_argument_group("Server options")
+    server_group.add_argument(
+        "--host",
+        default=config_defaults.get("server_host", None),
+        help=f"server host (default: {config_defaults.get('server_host', None)})",
+    )
+    server_group.add_argument(
+        "--port",
+        type=int,
+        default=config_defaults.get("server_port", 8256),
+        help=f"server port (default: {config_defaults.get('server_port', 8256)})",
     )
 
     # log level
@@ -204,6 +236,8 @@ def main():
         "loglevel": config.cfg.global_config.loglevel,
         "no_download": config.cfg.global_config.no_download,
         "client": config.cfg.downloader.client,
+        "server_host": config.cfg.server.host,
+        "server_port": config.cfg.server.port,
     }
 
     # Re-setup parser with configuration default values
@@ -220,7 +254,8 @@ def main():
     app_logger.debug(f"No download: {args.no_download}")
     app_logger.debug(f"Log level: {args.loglevel}")
     app_logger.debug(f"Client URL: {args.client}")
-    app_logger.debug(f"CHECK_TRACKERS: {config.cfg.global_config.check_trackers}")
+    check_trackers = config.cfg.global_config.check_trackers
+    app_logger.debug(f"CHECK_TRACKERS: {check_trackers if check_trackers else 'All trackers allowed'}")
 
     # Display target sites configuration
     app_logger.debug(f"Target sites configured: {len(config.cfg.target_sites)}")
@@ -243,7 +278,42 @@ def main():
         app_logger.success("Successfully connected to torrent client")
 
         # Decide operation based on command line arguments
-        if args.retry_undownloaded:
+        if args.server:
+            # Server mode
+            app_logger.info(f"Starting server mode on {args.host}:{args.port}")
+
+            run_webserver(
+                host=args.host,
+                port=args.port,
+                log_level=args.loglevel,
+            )
+        elif args.torrent:
+            # Single torrent mode
+            app_logger.info(f"Processing single torrent: {args.torrent}")
+
+            result = process_single_torrent(
+                torrent_client=torrent_client,
+                target_apis=target_apis,
+                infohash=args.torrent,
+            )
+
+            # Print result
+            app_logger.info(f"Processing result: {result['status']}")
+            app_logger.info(f"Message: {result['message']}")
+            if result.get("torrent_name"):
+                app_logger.info(f"Torrent name: {result['torrent_name']}")
+            if result.get("infohash"):
+                app_logger.info(f"Torrent infohash: {result['infohash']}")
+            if result.get("existing_trackers"):
+                app_logger.info(f"Existing trackers: {result['existing_trackers']}")
+            if result.get("stats"):
+                stats = result["stats"]
+                app_logger.info(
+                    f"Stats - Found: {stats.get('found', 0)}, "
+                    f"Downloaded: {stats.get('downloaded', 0)}, "
+                    f"Scanned: {stats.get('scanned', 0)}"
+                )
+        elif args.retry_undownloaded:
             # Re-download undownloaded torrents
             retry_undownloaded_torrents(torrent_client, target_apis)
         else:

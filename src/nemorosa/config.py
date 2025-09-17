@@ -22,7 +22,10 @@ class GlobalConfig(msgspec.Struct):
     loglevel: str = "info"
     no_download: bool = False
     exclude_mp3: bool = True
-    check_trackers: list[str] = msgspec.field(default_factory=lambda: ["flacsfor.me", "home.opsfet.ch", "52dic.vip"])
+    check_trackers: list[str] | None = msgspec.field(
+        default_factory=lambda: ["flacsfor.me", "home.opsfet.ch", "52dic.vip"]
+    )
+    check_music_only: bool = False
 
     def __post_init__(self):
         # Validate log level
@@ -30,9 +33,12 @@ class GlobalConfig(msgspec.Struct):
         if self.loglevel not in valid_levels:
             raise ValueError(f"Invalid loglevel '{self.loglevel}'. Must be one of: {valid_levels}")
 
-        # Validate check_trackers is a list
-        if not isinstance(self.check_trackers, list):
-            raise ValueError("check_trackers must be a list")
+        # Validate check_trackers is a non-empty list or None
+        if self.check_trackers is not None:
+            if not isinstance(self.check_trackers, list):
+                raise ValueError("check_trackers must be a list or None")
+            if len(self.check_trackers) == 0:
+                raise ValueError("check_trackers must be a non-empty list or None")
 
 
 class DownloaderConfig(msgspec.Struct):
@@ -52,6 +58,19 @@ class DownloaderConfig(msgspec.Struct):
         # Validate label cannot be empty
         if not self.label or not self.label.strip():
             raise ValueError("Downloader label cannot be empty")
+
+
+class ServerConfig(msgspec.Struct):
+    """Server configuration."""
+
+    host: str | None = None
+    port: int = 8256
+    api_key: str | None = None
+
+    def __post_init__(self):
+        # Validate port range
+        if not isinstance(self.port, int) or not (1 <= self.port <= 65535):
+            raise ValueError(f"Server port must be an integer between 1 and 65535, got: {self.port}")
 
 
 class TargetSiteConfig(msgspec.Struct):
@@ -82,6 +101,7 @@ class NemorosaConfig(msgspec.Struct):
 
     global_config: GlobalConfig = msgspec.field(name="global", default_factory=GlobalConfig)
     downloader: DownloaderConfig = msgspec.field(default_factory=DownloaderConfig)
+    server: ServerConfig = msgspec.field(default_factory=ServerConfig)
     target_sites: list[TargetSiteConfig] = msgspec.field(name="target_site", default_factory=list)
 
     def __post_init__(self):
@@ -219,8 +239,10 @@ def create_default_config(target_path: str | None = None) -> str:
             "no_download": False,
             "exclude_mp3": True,
             "check_trackers": ["flacsfor.me", "home.opsfet.ch", "52dic.vip"],
+            "check_music_only": False,
         },
         "downloader": {"client": "transmission+http://user:pass@localhost:9091/transmission/rpc", "label": "nemorosa"},
+        "server": {"host": None, "port": 8256, "api_key": None},
         "target_site": [
             {"server": "https://redacted.sh", "tracker": "flacsfor.me", "api_key": "your_api_key_here"},
             {"server": "https://orpheus.network", "tracker": "home.opsfet.ch", "api_key": "your_api_key_here"},

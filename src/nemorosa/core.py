@@ -3,6 +3,7 @@
 import posixpath
 import re
 import traceback
+from typing import Any
 from urllib.parse import urlparse
 
 import torf
@@ -409,6 +410,84 @@ def scan(
     return tid, downloaded
 
 
+def process_single_torrent_from_client(
+    torrent_client: TorrentClient,
+    target_apis: list[dict],
+    torrent_name: str,
+    torrent_details: dict,
+    GLOBAL: dict,
+) -> bool:
+    """Process a single torrent from client torrent list.
+
+    Args:
+        torrent_client (TorrentClient): Torrent client instance.
+        target_apis (list[dict]): Target site API list.
+        torrent_name (str): Name of the torrent.
+        torrent_details (dict): Torrent details from client.
+        GLOBAL (dict): Global statistics dictionary.
+
+    Returns:
+        bool: True if any target site was successful, False otherwise.
+    """
+    app_logger = logger.get_logger()
+
+    # Check if torrent has been scanned
+    if is_hash_scanned(torrent_details["hash"]):
+        app_logger.debug(
+            "Skipping already scanned torrent: %s (%s)",
+            torrent_name,
+            torrent_details["hash"],
+        )
+        return False
+
+    # Prepare file list and size
+    tsize = torrent_details["total_size"]
+    fdict = {posixpath.relpath(f["name"], torrent_name): f["length"] for f in torrent_details["files"]}
+
+    # Try to get torrent data from torrent client for hash search
+    torrent_object = None
+    # Get torrent hash from torrent details
+    torrent_hash = torrent_details["hash"]
+    torrent_object = torrent_client.get_torrent_object(torrent_hash)
+
+    # Scan and match for each target site
+    any_success = False
+    existing_target_trackers = set(torrent_details.get("existing_target_trackers", []))
+
+    for api_info in target_apis:
+        app_logger.debug(f"Trying target site: {api_info['server']} (tracker: {api_info['tracker']})")
+
+        # Check if this content already exists on current target tracker
+        if api_info["tracker"] in existing_target_trackers:
+            app_logger.debug(f"Content already exists on {api_info['tracker']}, skipping")
+            continue
+
+        try:
+            # Scan and match
+            tid, downloaded = scan(
+                fdict=fdict,
+                tsize=tsize,
+                scan_source=torrent_details["hash"],
+                local_torrent_name=torrent_name,
+                api=api_info["api"],
+                download_dir=torrent_details["download_dir"],
+                torrent_client=torrent_client,
+                GLOBAL=GLOBAL,
+                target_site_info=api_info,  # Pass site info for recording
+                torrent_object=torrent_object,  # Pass torrent object for hash search
+            )
+
+            if tid != -1:
+                any_success = True
+                app_logger.success(f"Successfully processed on {api_info['server']}")
+
+        except Exception as e:
+            app_logger.error(f"Error processing torrent on {api_info['server']}: {e}")
+            continue
+
+    return any_success
+
+
 def process_torrents(
     torrent_client: TorrentClient,
     target_apis: list[dict],
@@ -433,15 +512,6 @@ def process_torrents(
         app_logger.debug("Found %d torrents in client matching the criteria", len(torrents))
 
         for i, (torrent_name, torrent_details) in enumerate(torrents.items()):
-            # Check if torrent has been scanned
-            if is_hash_scanned(torrent_details["hash"]):
-                app_logger.debug(
-                    "Skipping already scanned torrent: %s (%s)",
-                    torrent_name,
-                    torrent_details["hash"],
-                )
-                continue
-
             app_logger.header(
                 "Processing %d/%d: %s (%s)",
                 i + 1,
@@ -450,50 +520,14 @@ def process_torrents(
                 torrent_details["hash"],
             )
 
-            # Prepare file list and size
-            tsize = torrent_details["total_size"]
-            fdict = {posixpath.relpath(f["name"], torrent_name): f["length"] for f in torrent_details["files"]}
-
-            # Try to get torrent data from torrent client for hash search
-            torrent_object = None
-            # Get torrent hash from torrent details
-            torrent_hash = torrent_details["hash"]
-            torrent_object = torrent_client.get_torrent_object(torrent_hash)
-
-            # Scan and match for each target site
-            any_success = False
-            existing_target_trackers = set(torrent_details.get("existing_target_trackers", []))
-
-            for api_info in target_apis:
-                app_logger.debug(f"Trying target site: {api_info['server']} (tracker: {api_info['tracker']})")
-
-                # Check if this content already exists on current target tracker
-                if api_info["tracker"] in existing_target_trackers:
-                    app_logger.debug(f"Content already exists on {api_info['tracker']}, skipping")
-                    continue
-
-                try:
-                    # Scan and match
-                    tid, downloaded = scan(
-                        fdict=fdict,
-                        tsize=tsize,
-                        scan_source=torrent_details["hash"],
-                        local_torrent_name=torrent_name,
-                        api=api_info["api"],
-                        download_dir=torrent_details["download_dir"],
-                        torrent_client=torrent_client,
-                        GLOBAL=GLOBAL,
-                        target_site_info=api_info,  # Pass site info for recording
-                        torrent_object=torrent_object,  # Pass torrent object for hash search
-                    )
-
-                    if tid != -1:
-                        any_success = True
-                        app_logger.success(f"Successfully processed on {api_info['server']}")
-
-                except Exception as e:
-                    app_logger.error(f"Error processing torrent on {api_info['server']}: {e}")
-                    continue
+            # Process single torrent
+            any_success = process_single_torrent_from_client(
+                torrent_client=torrent_client,
+                target_apis=target_apis,
+                torrent_name=torrent_name,
+                torrent_details=torrent_details,
+                GLOBAL=GLOBAL,
+            )
 
             # Record processed torrents (scan history handled inside scan function)
             if any_success:
@@ -589,3 +623,83 @@ def retry_undownloaded_torrents(
         app_logger.success("Failed downloads: %d", GLOBAL["failed"])
         app_logger.success("Removed from undownloaded list: %d", GLOBAL["removed"])
         app_logger.section("===== Retry Undownloaded Torrents Complete =====")
+
+
+def process_single_torrent(
+    torrent_client: TorrentClient,
+    target_apis: list[dict],
+    infohash: str,
+) -> dict[str, Any]:
+    """Process a single torrent by infohash from torrent client.
+
+    Args:
+        torrent_client (TorrentClient): Torrent client instance.
+        target_apis (list[dict]): Target site API list, each element contains api, tracker, server.
+        infohash (str): Infohash of the torrent to process.
+
+    Returns:
+        dict: Processing result with status and details.
+    """
+    app_logger = logger.get_logger()
+
+    try:
+        # Extract target_trackers from target_apis
+        target_trackers = [api_info["tracker"] for api_info in target_apis if api_info["tracker"]]
+
+        # Get torrent details from torrent client with existing trackers info
+        torrent_info = torrent_client.get_single_torrent(infohash, target_trackers)
+
+        if not torrent_info:
+            return {
+                "status": "error",
+                "message": f"Torrent with infohash {infohash} not found in client",
+                "infohash": infohash,
+            }
+
+        # Check if torrent has been scanned
+        if is_hash_scanned(infohash):
+            return {
+                "status": "skipped",
+                "message": f"Torrent {infohash} already scanned",
+                "infohash": infohash,
+                "torrent_name": torrent_info["name"],
+            }
+
+        # Check if torrent already exists on all target trackers
+        existing_trackers = set(torrent_info.get("existing_target_trackers", []))
+        target_tracker_set = set(target_trackers)
+
+        if target_tracker_set.issubset(existing_trackers):
+            return {
+                "status": "skipped",
+                "message": f"Torrent already exists on all target trackers: {list(existing_trackers)}",
+                "infohash": infohash,
+                "torrent_name": torrent_info["name"],
+                "existing_trackers": list(existing_trackers),
+            }
+
+        # Initialize GLOBAL stats
+        GLOBAL = {"found": 0, "downloaded": 0, "scanned": 0, "cnt_dl_fail": 0}
+
+        # Process the torrent using the same logic as process_single_torrent_from_client
+        any_success = process_single_torrent_from_client(
+            torrent_client=torrent_client,
+            target_apis=target_apis,
+            torrent_name=torrent_info["name"],
+            torrent_details=torrent_info,
+            GLOBAL=GLOBAL,
+        )
+
+        return {
+            "status": "success" if any_success else "not_found",
+            "message": f"Processed torrent: {torrent_info['name']} ({infohash})",
+            "infohash": infohash,
+            "torrent_name": torrent_info["name"],
+            "any_success": any_success,
+            "stats": GLOBAL,
+            "existing_trackers": list(existing_trackers),
+        }
+
+    except Exception as e:
+        app_logger.error(f"Error processing single torrent {infohash}: {str(e)}")
+        return {"status": "error", "message": f"Error processing torrent: {str(e)}", "infohash": infohash}
