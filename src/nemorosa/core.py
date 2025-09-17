@@ -364,6 +364,11 @@ def scan(
         if not torrent_object:
             torrent_data = api.download_torrent(tid)
             torrent_object = torf.Torrent.read_stream(torrent_data)
+        else:
+            # If torrent_object exists (from hash search), set torrent permalink to comment
+            torrent_object.comment = api.get_torrent_url(tid)
+            torrent_data = torrent_object.dump()
+            
         fdict_torrent = {}
         for f in torrent_object.files:
             fdict_torrent["/".join(f.parts[1:])] = f.size

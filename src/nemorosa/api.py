@@ -166,6 +166,17 @@ class GazelleBase:
         """
         raise NotImplementedError("Subclasses must implement _download_torrent_response")
 
+    def get_torrent_url(self, torrent_id):
+        """Get the permalink for a torrent by its ID.
+
+        Args:
+            torrent_id: The ID of the torrent.
+
+        Returns:
+            str: Torrent permalink.
+        """
+        return f"{self.server}/torrents.php?torrentid={torrent_id}"
+
     def get_torrent_link(self, torrent_id):
         """Get the direct download link for a torrent by its ID.
 
