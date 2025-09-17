@@ -22,6 +22,7 @@ class WebhookResponse(BaseModel):
 
 # Global variables
 app_logger: logging.Logger | None = None
+target_apis: list | None = None
 
 # Create FastAPI app
 app = FastAPI(
@@ -41,9 +42,6 @@ def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)
     if not api_key:
         # No API key configured, allow all requests
         return True
-
-    if not credentials:
-        raise HTTPException(status_code=401, detail="API key required")
 
     if credentials.credentials != api_key:
         raise HTTPException(status_code=401, detail="Invalid API key")
@@ -71,14 +69,8 @@ async def root():
     return {
         "message": "Nemorosa Web Server",
         "version": "0.0.1",
-        "endpoints": {"webhook": "/api/webhook", "health": "/health", "docs": "/docs"},
+        "endpoints": {"webhook": "/api/webhook", "docs": "/docs"},
     }
-
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint."""
-    return {"status": "healthy", "service": "nemorosa"}
 
 
 @app.post("/api/webhook", response_model=WebhookResponse)
@@ -92,27 +84,23 @@ async def webhook(infoHash: str = Query(..., description="Torrent infohash"), _:
     Returns:
         WebhookResponse: Processing result
     """
+    # Validate infoHash is not empty
+    if not infoHash or not infoHash.strip():
+        raise HTTPException(status_code=400, detail="infoHash cannot be empty")
+
     try:
         # Create torrent client using global config
         torrent_client = create_torrent_client(config.cfg.downloader.client)
         if app_logger:
             torrent_client.set_logger(app_logger)
 
-        # Set up target APIs from global config
-        target_apis = []
-        for site_config in config.cfg.target_sites:
-            target_apis.append(
-                {
-                    "api": None,  # This would need to be set up properly
-                    "tracker": site_config.tracker,
-                    "server": site_config.server,
-                }
-            )
+        # Use the provided target_apis
+        current_target_apis = globals()["target_apis"]
 
         # Process the torrent
         result = process_single_torrent(
             torrent_client=torrent_client,
-            target_apis=target_apis,
+            target_apis=current_target_apis,
             infohash=infoHash,
         )
 
@@ -131,6 +119,7 @@ def run_webserver(
     host: str | None = None,
     port: int | None = None,
     log_level: str = "info",
+    target_apis: list | None = None,
 ):
     """Run the web server.
 
@@ -138,6 +127,7 @@ def run_webserver(
         host: Server host (if None, use config value)
         port: Server port (if None, use config value)
         log_level: Log level
+        target_apis: List of target API connections
     """
     global app_logger
 
@@ -147,11 +137,15 @@ def run_webserver(
     if port is None:
         port = config.cfg.server.port
 
+    # Set global target_apis
+    globals()["target_apis"] = target_apis
+
     # Set up logger
     app_logger = logger.generate_logger(log_level)
 
     # Log server startup
-    app_logger.info(f"Starting Nemorosa web server on {host}:{port}")
+    display_host = host if host is not None else "all interfaces (IPv4/IPv6)"
+    app_logger.info(f"Starting Nemorosa web server on {display_host}:{port}")
     app_logger.info(f"Using torrent client: {config.cfg.downloader.client}")
     app_logger.info(f"Target sites: {len(config.cfg.target_sites)}")
 

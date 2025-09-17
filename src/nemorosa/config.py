@@ -1,5 +1,6 @@
 """Nemorosa configuration processing module."""
 
+import secrets
 import sys
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,7 @@ class GlobalConfig(msgspec.Struct):
     check_trackers: list[str] | None = msgspec.field(
         default_factory=lambda: ["flacsfor.me", "home.opsfet.ch", "52dic.vip"]
     )
-    check_music_only: bool = False
+    check_music_only: bool = True
 
     def __post_init__(self):
         # Validate log level
@@ -233,24 +234,51 @@ def create_default_config(target_path: str | None = None) -> str:
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Default configuration content
-    default_config = {
-        "global": {
-            "loglevel": "info",
-            "no_download": False,
-            "exclude_mp3": True,
-            "check_trackers": ["flacsfor.me", "home.opsfet.ch", "52dic.vip"],
-            "check_music_only": False,
-        },
-        "downloader": {"client": "transmission+http://user:pass@localhost:9091/transmission/rpc", "label": "nemorosa"},
-        "server": {"host": None, "port": 8256, "api_key": None},
-        "target_site": [
-            {"server": "https://redacted.sh", "tracker": "flacsfor.me", "api_key": "your_api_key_here"},
-            {"server": "https://orpheus.network", "tracker": "home.opsfet.ch", "api_key": "your_api_key_here"},
-        ],
-    }
+    default_config = f"""# Nemorosa Configuration File
+
+global:
+  # Global settings
+  loglevel: info  # Log level: debug, info, warning, error, critical
+  no_download: false  # Whether to only check without downloading
+  exclude_mp3: true  # Whether to exclude MP3 format files
+  check_trackers:  # List of trackers to check, set to null to check all
+    - "flacsfor.me"
+    - "home.opsfet.ch" 
+    - "52dic.vip"
+  check_music_only: true  # Whether to check music files only
+
+server:
+  # Web server settings
+  host: null  # Server host address, null means listen on all interfaces
+  port: 8256  # Server port
+  api_key: {secrets.token_urlsafe(32)}  # API key for accessing web interface
+
+downloader:
+  # Downloader settings
+  # Supported downloader formats:
+
+  # transmission+http://user:pass@host:port/transmission/rpc?torrents_dir=/path/to/session/
+  # deluge://username:password@host:port/?torrents_dir=/path/to/session/
+  # qbittorrent+http://username:password@host:port/?torrents_dir=/path/to/session/
+
+  client: "transmission+http://user:pass@localhost:9091/transmission/rpc"
+  label: "nemorosa"  # Download label (cannot be empty)
+
+target_site:
+  # Target site settings
+  - server: "https://redacted.sh"
+    tracker: "flacsfor.me"
+    api_key: "your_api_key_here"
+  - server: "https://orpheus.network"
+    tracker: "home.opsfet.ch"
+    api_key: "your_api_key_here"
+  - server: "https://dicmusic.com"
+    tracker: "52dic.vip"
+    cookie: "your_cookie_here" # only cookie is supported for dicmusic.com
+"""
 
     with open(target_path, "w", encoding="utf-8") as f:
-        yaml.dump(default_config, f, default_flow_style=False, allow_unicode=True, indent=2)
+        f.write(default_config)
 
     return str(target_path)
 

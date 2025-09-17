@@ -280,12 +280,14 @@ def main():
         # Decide operation based on command line arguments
         if args.server:
             # Server mode
-            app_logger.info(f"Starting server mode on {args.host}:{args.port}")
+            display_host = args.host if args.host is not None else "all interfaces (IPv4/IPv6)"
+            app_logger.info(f"Starting server mode on {display_host}:{args.port}")
 
             run_webserver(
                 host=args.host,
                 port=args.port,
                 log_level=args.loglevel,
+                target_apis=target_apis,
             )
         elif args.torrent:
             # Single torrent mode

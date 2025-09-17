@@ -142,8 +142,8 @@ class GazelleBase:
                 self.logger.debug(f"Torrent {torrent_id} downloaded successfully")
 
                 # Check and modify source flag
-                modified_content = self._check_and_modify_source_flag(response.content)
-                return modified_content
+                # modified_content = self._check_and_modify_source_flag(response.content)
+                return response.content
             except Exception as e:
                 if attempt < max_retries - 1:
                     self.logger.warning(f"Error downloading torrent: {e}, retrying ({attempt + 1}/{max_retries})...")

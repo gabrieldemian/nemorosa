@@ -1,0 +1,13 @@
+services:
+  nemorosa:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nemorosa
+    restart: on-failure
+    # user: "1000:1000"
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8256:8256"
+    command: "--server"
