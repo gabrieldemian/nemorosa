@@ -359,15 +359,15 @@ def scan(
         GLOBAL["found"] += 1
         app_logger.success(f"Found match! Torrent ID: {tid}")
 
-        # If found via hash search, use the original torrent object
+        # If found via hash search, modify the existing torrent for the new tracker
         # Otherwise, download the torrent data
-        if not torrent_object:
+        if torrent_object:
+            torrent_object.comment = api.get_torrent_url(tid)
+            torrent_object.trackers = [api.announce]
+            torrent_data = torrent_object.dump()
+        else:
             torrent_data = api.download_torrent(tid)
             torrent_object = torf.Torrent.read_stream(torrent_data)
-        else:
-            # If torrent_object exists (from hash search), set torrent permalink to comment
-            torrent_object.comment = api.get_torrent_url(tid)
-            torrent_data = torrent_object.dump()
             
         fdict_torrent = {}
         for f in torrent_object.files:

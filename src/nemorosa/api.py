@@ -22,7 +22,7 @@ class RequestException(Exception):
 class GazelleBase:
     """Base class for Gazelle API, containing common attributes and methods."""
 
-    def __init__(self, interval, server=None):
+    def __init__(self, server):
         self.session = requests.Session()
         self.session.headers = {
             "Accept-Charset": "utf-8",
@@ -33,10 +33,15 @@ class GazelleBase:
         self.authkey = None
         self.passkey = None
         self.last_request_time = 0
-        self.interval = interval + 0.1  # seconds between requests
         self.logger = logger.ColorLogger(loglevel=config.cfg.global_config.loglevel)
-        # Set source flag based on server
-        self.source_flag = SOURCE_FLAG_MAPPING.get(server, "")
+
+        self.interval = API_INTERVAL_MAPPING[server] + 0.1
+        self.source_flag = SOURCE_FLAG_MAPPING[server]
+        self.tracker_url = TRACKER_URL_MAPPING[server]
+    
+    @property
+    def announce(self):
+        return f"{self.tracker_url}/{self.passkey}/announce"
 
     def wait(self):
         """Ensure request interval time."""
@@ -245,8 +250,6 @@ class GazelleBase:
         r = self.session.get(ajaxpage, params=params, allow_redirects=False)
         try:
             json_response = r.json()
-            if json_response["status"] != "success":
-                raise RequestException
             return json_response
         except ValueError as e:
             raise RequestException from e
@@ -319,8 +322,8 @@ class GazelleBase:
 
 
 class GazelleJSONAPI(GazelleBase):
-    def __init__(self, interval, api_key=None, cookies=None, server=None):
-        super().__init__(interval, server)
+    def __init__(self, api_key=None, cookies=None, server=None):
+        super().__init__(server)
 
         # Add API key to headers (if provided)
         if api_key:
@@ -330,10 +333,11 @@ class GazelleJSONAPI(GazelleBase):
 
         if api_key is None and cookies:
             self.session.cookies = cookies
-            try:
-                self._auth()
-            except RequestException as e:
-                self.logger.error(f"Failed to authenticate with cookies: {e}")
+
+        try:
+            self._auth()
+        except RequestException as e:
+            self.logger.error(f"Failed to authenticate: {e}")
 
     def _auth(self):
         """Get auth key from server.
@@ -425,14 +429,25 @@ class GazelleJSONAPI(GazelleBase):
 
 
 class GazelleParser(GazelleBase):
-    def __init__(self, interval, cookies=None, server=None, api_key=None):
-        super().__init__(interval, server)
+    def __init__(self, cookies=None, server=None, api_key=None):
+        super().__init__(server)
 
         if cookies:
             self.session.cookies.update(cookies)
             self.logger.info("Using provided cookies")
         else:
             self.logger.warning("No cookies provided")
+
+    def _auth(self):
+        """Get authkey and passkey from server by performing a blank search.
+
+        Raises:
+            RequestException: If authentication fails.
+        """
+        try:
+            self.search_torrent_by_filename("")
+        except RequestException as e:
+            self.logger.error(f"Failed to authenticate: {e}")
 
     def search_torrent_by_filename(self, filename):
         """Execute search and return torrent list.
@@ -595,6 +610,14 @@ SOURCE_FLAG_MAPPING = {
     "https://lztr.me": "LZTR",
 }
 
+TRACKER_URL_MAPPING = {
+    "https://redacted.sh": "https://flacsfor.me",
+    "https://orpheus.network": "https://home.opsfet.ch",
+    "https://dicmusic.com": "https://tracker.52dic.vip",
+    "https://libble.me": "https://tracker.libble.me:34443",
+    "https://lztr.me": "https://tracker.lztr.me:34443",
+}
+
 
 def get_api_instance(server, cookies=None, api_key=None):
     """Get appropriate API instance based on server address.
@@ -614,6 +637,5 @@ def get_api_instance(server, cookies=None, api_key=None):
         raise ValueError(f"Unsupported server: {server}")
 
     api_class = API_TYPE_MAPPING[server]
-    interval = API_INTERVAL_MAPPING[server]
 
-    return api_class(interval=interval, cookies=cookies, api_key=api_key, server=server)
+    return api_class(cookies=cookies, api_key=api_key, server=server)
