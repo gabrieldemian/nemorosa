@@ -233,6 +233,9 @@ class TorrentClient(ABC):
         Returns:
             bool: True if injection successful, False otherwise.
         """
+        # Flag to track if rename map has been processed
+        rename_map_processed = False
+
         max_retries = 8
         for attempt in range(max_retries):
             try:
@@ -257,9 +260,12 @@ class TorrentClient(ABC):
                     if self.logger:
                         self.logger.debug(f"Renamed torrent from {current_name} to {local_torrent_name}")
 
-                rename_map = self._process_rename_map(
-                    torrent_id=torrent_id, base_path=local_torrent_name, rename_map=rename_map
-                )
+                # Process rename map only once
+                if not rename_map_processed:
+                    rename_map = self._process_rename_map(
+                        torrent_id=torrent_id, base_path=local_torrent_name, rename_map=rename_map
+                    )
+                    rename_map_processed = True
 
                 # Rename files
                 if rename_map:

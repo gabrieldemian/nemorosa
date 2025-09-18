@@ -67,6 +67,8 @@ class ServerConfig(msgspec.Struct):
     host: str | None = None
     port: int = 8256
     api_key: str | None = None
+    search_cadence: str | None = None  # e.g., "1 day", "6 hours"
+    cleanup_cadence: str = "1 day"  # Default cleanup cadence
 
     def __post_init__(self):
         # Validate port range
@@ -78,15 +80,12 @@ class TargetSiteConfig(msgspec.Struct):
     """Target site configuration."""
 
     server: str = ""
-    tracker: str = ""
     api_key: str | None = None
     cookie: str | None = None
 
     def __post_init__(self):
         if not self.server:
             raise ValueError("Target site server URL is required")
-        if not self.tracker:
-            raise ValueError("Target site tracker is required")
 
         # At least one of api_key or cookie is required
         if not self.api_key and not self.cookie:
@@ -252,6 +251,9 @@ server:
   host: null  # Server host address, null means listen on all interfaces
   port: 8256  # Server port
   api_key: {secrets.token_urlsafe(32)}  # API key for accessing web interface
+  # Scheduled job settings (optional, set to null to disable)
+  search_cadence: "1 day"  # How often to run search job (e.g., "1 day", "6 hours", "30 minutes")
+  cleanup_cadence: "1 day"  # How often to run cleanup job
 
 downloader:
   # Downloader settings
@@ -267,13 +269,10 @@ downloader:
 target_site:
   # Target site settings
   - server: "https://redacted.sh"
-    tracker: "flacsfor.me"
     api_key: "your_api_key_here"
   - server: "https://orpheus.network"
-    tracker: "home.opsfet.ch"
     api_key: "your_api_key_here"
   - server: "https://dicmusic.com"
-    tracker: "52dic.vip"
     cookie: "your_cookie_here" # only cookie is supported for dicmusic.com
 """
 

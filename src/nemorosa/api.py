@@ -4,6 +4,7 @@ import time
 from urllib.parse import parse_qs, urljoin, urlparse
 
 import humanfriendly
+import msgspec
 import requests
 import torf
 from bs4 import BeautifulSoup, Tag
@@ -35,9 +36,11 @@ class GazelleBase:
         self.last_request_time = 0
         self.logger = logger.get_logger()
 
-        self.interval = API_INTERVAL_MAPPING[server] + 0.1
-        self.source_flag = SOURCE_FLAG_MAPPING[server]
-        self.tracker_url = TRACKER_URL_MAPPING[server]
+        spec = TRACKER_SPECS[server]
+        self.interval = spec.interval + 0.1
+        self.source_flag = spec.source_flag
+        self.tracker_url = spec.tracker_url
+        self.tracker_query = spec.tracker_query
 
     @property
     def announce(self):
@@ -297,7 +300,7 @@ class GazelleBase:
             # Get current source flag (if exists)
             current_source = torrent.source
 
-            expected_source = SOURCE_FLAG_MAPPING.get(self.server)
+            expected_source = TRACKER_SPECS[self.server].source_flag
 
             # If source flag doesn't match, modify it
             if current_source != expected_source:
@@ -586,36 +589,52 @@ class GazelleParser(GazelleBase):
         return self.request(download_url)
 
 
-API_TYPE_MAPPING = {
-    "https://redacted.sh": GazelleJSONAPI,
-    "https://orpheus.network": GazelleJSONAPI,
-    "https://dicmusic.com": GazelleJSONAPI,
-    "https://libble.me": GazelleParser,
-    "https://lztr.me": GazelleParser,
-}
+class TrackerSpec(msgspec.Struct):
+    """Predefined Tracker specification."""
 
-API_INTERVAL_MAPPING = {
-    "https://redacted.sh": 1,
-    "https://orpheus.network": 2,
-    "https://dicmusic.com": 2,
-    "https://libble.me": 4,
-    "https://lztr.me": 4,
-}
+    api_type: type[GazelleJSONAPI] | type[GazelleParser]
+    interval: int
+    source_flag: str
+    tracker_url: str
+    tracker_query: str
 
-SOURCE_FLAG_MAPPING = {
-    "https://redacted.sh": "RED",
-    "https://orpheus.network": "OPS",
-    "https://dicmusic.com": "DICMusic",
-    "https://libble.me": "LENNY",
-    "https://lztr.me": "LZTR",
-}
 
-TRACKER_URL_MAPPING = {
-    "https://redacted.sh": "https://flacsfor.me",
-    "https://orpheus.network": "https://home.opsfet.ch",
-    "https://dicmusic.com": "https://tracker.52dic.vip",
-    "https://libble.me": "https://tracker.libble.me:34443",
-    "https://lztr.me": "https://tracker.lztr.me:34443",
+TRACKER_SPECS = {
+    "https://redacted.sh": TrackerSpec(
+        api_type=GazelleJSONAPI,
+        interval=1,
+        source_flag="RED",
+        tracker_url="https://flacsfor.me",
+        tracker_query="flacsfor.me",
+    ),
+    "https://orpheus.network": TrackerSpec(
+        api_type=GazelleJSONAPI,
+        interval=2,
+        source_flag="OPS",
+        tracker_url="https://home.opsfet.ch",
+        tracker_query="home.opsfet.ch",
+    ),
+    "https://dicmusic.com": TrackerSpec(
+        api_type=GazelleJSONAPI,
+        interval=2,
+        source_flag="DICMusic",
+        tracker_url="https://tracker.52dic.vip",
+        tracker_query="tracker.52dic.vip",
+    ),
+    "https://libble.me": TrackerSpec(
+        api_type=GazelleParser,
+        interval=4,
+        source_flag="LENNY",
+        tracker_url="https://tracker.libble.me:34443",
+        tracker_query="tracker.libble.me",
+    ),
+    "https://lztr.me": TrackerSpec(
+        api_type=GazelleParser,
+        interval=4,
+        source_flag="LZTR",
+        tracker_url="https://tracker.lztr.me:34443",
+        tracker_query="tracker.lztr.me",
+    ),
 }
 
 
@@ -633,9 +652,9 @@ def get_api_instance(server, cookies=None, api_key=None):
     Raises:
         ValueError: If unsupported server is provided.
     """
-    if server not in API_TYPE_MAPPING:
+    if server not in TRACKER_SPECS:
         raise ValueError(f"Unsupported server: {server}")
 
-    api_class = API_TYPE_MAPPING[server]
+    api_class = TRACKER_SPECS[server].api_type
 
     return api_class(cookies=cookies, api_key=api_key, server=server)

@@ -8,7 +8,7 @@ import requests.cookies
 from colorama import init
 
 from . import api, config, db, logger
-from .core import process_single_torrent, process_torrents, retry_undownloaded_torrents
+from .core import NemorosaCore
 from .torrent_client import create_torrent_client
 from .webserver import run_webserver
 
@@ -174,7 +174,6 @@ def setup_target_sites(app_logger):
             target_sites.append(
                 {
                     "server": site_config.server,
-                    "tracker": site_config.tracker,
                     "api_key": site_config.api_key,
                     "cookies": site_cookies,
                 }
@@ -205,7 +204,7 @@ def setup_api_connections(target_sites, app_logger):
         app_logger.debug(f"Connecting to target site {i + 1}/{len(target_sites)}: {site['server']}")
         try:
             api_instance = api.get_api_instance(server=site["server"], api_key=site["api_key"], cookies=site["cookies"])
-            target_apis.append({"api": api_instance, "tracker": site["tracker"], "server": site["server"]})
+            target_apis.append(api_instance)
             app_logger.success(f"API connection established for {site['server']}")
         except Exception as e:
             app_logger.error(f"API connection failed for {site['server']}: {str(e)}")
@@ -260,7 +259,7 @@ def main():
     # Display target sites configuration
     app_logger.debug(f"Target sites configured: {len(config.cfg.target_sites)}")
     for i, site in enumerate(config.cfg.target_sites, 1):
-        app_logger.debug(f"  Site {i}: {site.server} (tracker: {site.tracker})")
+        app_logger.debug(f"  Site {i}: {site.server}")
 
     app_logger.section("===== Nemorosa Starting =====")
 
@@ -274,7 +273,6 @@ def main():
         app_logger.section("===== Connecting to Torrent Client =====")
         app_logger.debug("Connecting to torrent client at %s...", args.client)
         torrent_client = create_torrent_client(args.client)
-        torrent_client.set_logger(app_logger)  # Set logger
         app_logger.success("Successfully connected to torrent client")
 
         # Decide operation based on command line arguments
@@ -293,11 +291,8 @@ def main():
             # Single torrent mode
             app_logger.info(f"Processing single torrent: {args.torrent}")
 
-            result = process_single_torrent(
-                torrent_client=torrent_client,
-                target_apis=target_apis,
-                infohash=args.torrent,
-            )
+            processor = NemorosaCore(torrent_client, target_apis)
+            result = processor.process_single_torrent(args.torrent)
 
             # Print result
             app_logger.info(f"Processing result: {result['status']}")
@@ -317,10 +312,12 @@ def main():
                 )
         elif args.retry_undownloaded:
             # Re-download undownloaded torrents
-            retry_undownloaded_torrents(torrent_client, target_apis)
+            processor = NemorosaCore(torrent_client, target_apis)
+            processor.retry_undownloaded_torrents()
         else:
             # Normal torrent processing flow
-            process_torrents(torrent_client, target_apis)
+            processor = NemorosaCore(torrent_client, target_apis)
+            processor.process_torrents()
     except Exception as e:
         app_logger.critical("Error connecting to torrent client: %s", e)
         sys.exit(1)
