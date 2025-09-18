@@ -18,22 +18,14 @@ import qbittorrentapi
 import torf
 import transmission_rpc
 
-from . import config
+from . import config, logger
 
 
 class TorrentClient(ABC):
     """Abstract base class for torrent clients."""
 
     def __init__(self):
-        self.logger = None  # Will be set by the main application
-
-    def set_logger(self, logger):
-        """Set the logger instance.
-
-        Args:
-            logger: Logger instance to use.
-        """
-        self.logger = logger
+        self.logger = logger.get_logger()
 
     @abstractmethod
     def get_torrents(self) -> list[dict[str, Any]]:

@@ -8,7 +8,7 @@ import requests
 import torf
 from bs4 import BeautifulSoup, Tag
 
-from . import config, logger
+from . import logger
 
 
 class LoginException(Exception):
@@ -33,12 +33,12 @@ class GazelleBase:
         self.authkey = None
         self.passkey = None
         self.last_request_time = 0
-        self.logger = logger.ColorLogger(loglevel=config.cfg.global_config.loglevel)
+        self.logger = logger.get_logger()
 
         self.interval = API_INTERVAL_MAPPING[server] + 0.1
         self.source_flag = SOURCE_FLAG_MAPPING[server]
         self.tracker_url = TRACKER_URL_MAPPING[server]
-    
+
     @property
     def announce(self):
         return f"{self.tracker_url}/{self.passkey}/announce"
@@ -301,7 +301,7 @@ class GazelleBase:
 
             # If source flag doesn't match, modify it
             if current_source != expected_source:
-                logger.ColorLogger().info(
+                self.logger.info(
                     f"Modifying source flag from '{current_source}' to '{expected_source}' for server {self.server}"
                 )
                 torrent.source = expected_source
@@ -309,14 +309,14 @@ class GazelleBase:
 
                 return modified_content
             else:
-                logger.ColorLogger().debug(
+                self.logger.debug(
                     f"Source flag '{current_source}' already matches expected '{expected_source}' "
                     f"for server {self.server}"
                 )
                 return torrent_content
 
         except Exception as e:
-            logger.ColorLogger().error(f"Error checking/modifying source flag: {e}")
+            self.logger.error(f"Error checking/modifying source flag: {e}")
             # Return original content on error
             return torrent_content
 
