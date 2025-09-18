@@ -176,7 +176,7 @@ class NemorosaCore:
             # Record the number of results found
             self.logger.debug(f"Found {len(torrents)} potential matches for file '{fname_query}'")
 
-            # If no results found and it's a music file, try fallback search using filename tail
+            # If no results found and it's a music file, try make filename query and search again
             if len(torrents) == 0 and posixpath.splitext(fname)[1] in [
                 ".flac",
                 ".mp3",
@@ -357,6 +357,7 @@ class NemorosaCore:
         self.stats["scanned"] += 1
 
         tid = -1
+        use_existing_torrent = True
 
         # Try hash-based search first if torrent object is available
         if torrent_object:
@@ -365,6 +366,7 @@ class NemorosaCore:
         # If hash search didn't find anything, try filename search
         if tid == -1:
             tid = self.filename_search(fdict=fdict, tsize=tsize, api=api)
+            use_existing_torrent = False
 
         # Handle no match found case
         if tid == -1:
@@ -382,7 +384,7 @@ class NemorosaCore:
 
         # If found via hash search, modify the existing torrent for the new tracker
         # Otherwise, download the torrent data
-        if torrent_object:
+        if use_existing_torrent:
             torrent_object.comment = api.get_torrent_url(tid)
             torrent_object.trackers = [api.announce]
             torrent_data = torrent_object.dump()
@@ -692,3 +694,13 @@ class NemorosaCore:
         except Exception as e:
             self.logger.error(f"Error processing single torrent {infohash}: {str(e)}")
             return {"status": "error", "message": f"Error processing torrent: {str(e)}", "infohash": infohash}
+
+    def process_reverse_announce_torrent(
+        self,
+        torrent_name: str,
+        torrent_link: str,
+        torrent_data: bytes,
+    ) -> dict[str, Any]:
+        """Process a single announce torrent for cross-seeding."""
+        # TODO: Implement this
+        pass

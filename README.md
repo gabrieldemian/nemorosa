@@ -166,12 +166,10 @@ You can use either API keys or cookies for tracker authentication:
 target_site:
   # Using API key
   - server: "https://example.tracker"
-    tracker: "example.tracker"
     api_key: "your_api_key_here"
   
   # Using cookies
   - server: "https://example.tracker"
-    tracker: "example.tracker"
     cookie: "session=abc123; user=xyz789"
 ```
 

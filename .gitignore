@@ -4,4 +4,6 @@
 nemorosa.db
 results/
 .vscode/
+.cursor/
 config.yml
+test
