@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 import torf
 
 from . import api, config, db, filecompare, logger
-from .torrent_client import TorrentClient
+from .torrent_client import ClientTorrentInfo, TorrentClient
 
 
 class NemorosaCore:
@@ -439,7 +439,7 @@ class NemorosaCore:
     def process_single_torrent_from_client(
         self,
         torrent_name: str,
-        torrent_details: dict,
+        torrent_details: ClientTorrentInfo,
     ) -> bool:
         """Process a single torrent from client torrent list.
 
@@ -452,27 +452,27 @@ class NemorosaCore:
         """
 
         # Check if torrent has been scanned
-        if self.database.is_hash_scanned(torrent_details["hash"]):
+        if self.database.is_hash_scanned(torrent_details.hash):
             self.logger.debug(
                 "Skipping already scanned torrent: %s (%s)",
                 torrent_name,
-                torrent_details["hash"],
+                torrent_details.hash,
             )
             return False
 
         # Prepare file list and size
-        tsize = torrent_details["total_size"]
-        fdict = {posixpath.relpath(f["name"], torrent_name): f["length"] for f in torrent_details["files"]}
+        tsize = torrent_details.total_size
+        fdict = {posixpath.relpath(f.name, torrent_name): f.size for f in torrent_details.files}
 
         # Try to get torrent data from torrent client for hash search
         torrent_object = None
         # Get torrent hash from torrent details
-        torrent_hash = torrent_details["hash"]
+        torrent_hash = torrent_details.hash
         torrent_object = self.torrent_client.get_torrent_object(torrent_hash)
 
         # Scan and match for each target site
         any_success = False
-        existing_target_trackers = set(torrent_details.get("existing_target_trackers", []))
+        existing_target_trackers = set(torrent_details.existing_target_trackers)
 
         for api_instance in self.target_apis:
             self.logger.debug(f"Trying target site: {api_instance.server} (tracker: {api_instance.tracker_query})")
@@ -487,10 +487,10 @@ class NemorosaCore:
                 tid, _ = self.process_torrent_search(
                     fdict=fdict,
                     tsize=tsize,
-                    scan_source=torrent_details["hash"],
+                    scan_source=torrent_details.hash,
                     local_torrent_name=torrent_name,
                     api=api_instance,
-                    download_dir=torrent_details["download_dir"],
+                    download_dir=torrent_details.download_dir,
                     torrent_object=torrent_object,  # Pass torrent object for hash search
                 )
 
@@ -525,7 +525,7 @@ class NemorosaCore:
                     i + 1,
                     len(torrents),
                     torrent_name,
-                    torrent_details["hash"],
+                    torrent_details.hash,
                 )
 
                 # Process single torrent
@@ -657,11 +657,11 @@ class NemorosaCore:
                     "status": "skipped",
                     "message": f"Torrent {infohash} already scanned",
                     "infohash": infohash,
-                    "torrent_name": torrent_info["name"],
+                    "torrent_name": torrent_info.name,
                 }
 
             # Check if torrent already exists on all target trackers
-            existing_trackers = set(torrent_info.get("existing_target_trackers", []))
+            existing_trackers = set(torrent_info.existing_target_trackers)
             target_tracker_set = set(target_trackers)
 
             if target_tracker_set.issubset(existing_trackers):
@@ -669,7 +669,7 @@ class NemorosaCore:
                     "status": "skipped",
                     "message": f"Torrent already exists on all target trackers: {list(existing_trackers)}",
                     "infohash": infohash,
-                    "torrent_name": torrent_info["name"],
+                    "torrent_name": torrent_info.name,
                     "existing_trackers": list(existing_trackers),
                 }
 
@@ -678,15 +678,15 @@ class NemorosaCore:
 
             # Process the torrent using the same logic as process_single_torrent_from_client
             any_success = self.process_single_torrent_from_client(
-                torrent_name=torrent_info["name"],
+                torrent_name=torrent_info.name,
                 torrent_details=torrent_info,
             )
 
             return {
                 "status": "success" if any_success else "not_found",
-                "message": f"Processed torrent: {torrent_info['name']} ({infohash})",
+                "message": f"Processed torrent: {torrent_info.name} ({infohash})",
                 "infohash": infohash,
-                "torrent_name": torrent_info["name"],
+                "torrent_name": torrent_info.name,
                 "any_success": any_success,
                 "stats": self.stats,
                 "existing_trackers": list(existing_trackers),

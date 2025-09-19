@@ -14,11 +14,33 @@ from typing import Any
 from urllib.parse import parse_qsl, urlparse
 
 import deluge_client
+import msgspec
 import qbittorrentapi
 import torf
 import transmission_rpc
 
 from . import config, logger
+
+
+class ClientTorrentFile(msgspec.Struct):
+    """Represents a file within a torrent from torrent client."""
+
+    name: str
+    size: int
+
+
+class ClientTorrentInfo(msgspec.Struct):
+    """Represents a torrent with all its information from torrent client."""
+
+    id: str | int
+    name: str
+    hash: str
+    percent_done: float
+    total_size: int
+    files: list[ClientTorrentFile]
+    trackers: list[str]
+    download_dir: str
+    existing_target_trackers: list[str] = msgspec.field(default_factory=list)
 
 
 class TorrentClient(ABC):
@@ -28,15 +50,15 @@ class TorrentClient(ABC):
         self.logger = logger.get_logger()
 
     @abstractmethod
-    def get_torrents(self) -> list[dict[str, Any]]:
+    def get_torrents(self) -> list[ClientTorrentInfo]:
         """Get all torrents from client.
 
         Returns:
-            list[dict[str, Any]]: List of torrent information dictionaries.
+            list[ClientTorrentInfo]: List of torrent information objects.
         """
         pass
 
-    def get_single_torrent(self, infohash: str, target_trackers: list[str]) -> dict[str, Any] | None:
+    def get_single_torrent(self, infohash: str, target_trackers: list[str]) -> ClientTorrentInfo | None:
         """Get single torrent by infohash with existing trackers information.
 
         This method follows the same logic as get_filtered_torrents but for a single torrent.
@@ -57,7 +79,7 @@ class TorrentClient(ABC):
             # Find torrent by infohash
             target_torrent = None
             for torrent in torrents:
-                if torrent.get("hash") == infohash:
+                if torrent.hash == infohash:
                     target_torrent = torrent
                     break
 
@@ -67,13 +89,13 @@ class TorrentClient(ABC):
             # Check if torrent meets basic conditions (same as get_filtered_torrents)
             check_trackers_list = config.cfg.global_config.check_trackers
             if check_trackers_list and not any(
-                any(check_str in url for check_str in check_trackers_list) for url in target_torrent["trackers"]
+                any(check_str in url for check_str in check_trackers_list) for url in target_torrent.trackers
             ):
                 return None
 
             # Filter MP3 files (based on configuration)
             if config.cfg.global_config.exclude_mp3:
-                has_mp3 = any(posixpath.splitext(file["name"])[1].lower() == ".mp3" for file in target_torrent["files"])
+                has_mp3 = any(posixpath.splitext(file.name)[1].lower() == ".mp3" for file in target_torrent.files)
                 if has_mp3:
                     return None
 
@@ -81,42 +103,43 @@ class TorrentClient(ABC):
             if config.cfg.global_config.check_music_only:
                 music_extensions = [".flac", ".mp3", ".dsf", ".dff", ".m4a"]
                 has_music = any(
-                    posixpath.splitext(file["name"])[1].lower() in music_extensions for file in target_torrent["files"]
+                    posixpath.splitext(file.name)[1].lower() in music_extensions for file in target_torrent.files
                 )
                 if not has_music:
                     return None
 
             # Get content name and find all torrents with the same content name
-            content_name = target_torrent["name"]
+            content_name = target_torrent.name
 
             # Collect which target trackers this content already exists on
             # (by checking all torrents with the same content name)
             existing_trackers = set()
             for torrent in torrents:
-                if torrent["name"] == content_name:
-                    for tracker_url in torrent["trackers"]:
+                if torrent.name == content_name:
+                    for tracker_url in torrent.trackers:
                         for target_tracker in target_trackers:
                             if target_tracker in tracker_url:
                                 existing_trackers.add(target_tracker)
 
             # Return torrent info with existing_trackers
-            return {
-                "hash": target_torrent["hash"],
-                "name": target_torrent["name"],
-                "percent_done": target_torrent["percent_done"],
-                "total_size": target_torrent["total_size"],
-                "files": target_torrent["files"],
-                "trackers": target_torrent["trackers"],
-                "download_dir": target_torrent["download_dir"],
-                "existing_target_trackers": list(existing_trackers),
-            }
+            return ClientTorrentInfo(
+                id=target_torrent.id,
+                name=target_torrent.name,
+                hash=target_torrent.hash,
+                percent_done=target_torrent.percent_done,
+                total_size=target_torrent.total_size,
+                files=target_torrent.files,
+                trackers=target_torrent.trackers,
+                download_dir=target_torrent.download_dir,
+                existing_target_trackers=list(existing_trackers),
+            )
 
         except Exception as e:
             if self.logger:
                 self.logger.error("Error retrieving single torrent: %s", e)
             return None
 
-    def get_filtered_torrents(self, target_trackers: list[str]) -> dict[str, dict]:
+    def get_filtered_torrents(self, target_trackers: list[str]) -> dict[str, ClientTorrentInfo]:
         """Get filtered torrent list.
 
         This method contains common filtering logic, derived classes only need to implement get_torrents().
@@ -144,13 +167,13 @@ class TorrentClient(ABC):
                 # Only process torrents that meet CHECK_TRACKERS conditions
                 check_trackers_list = config.cfg.global_config.check_trackers
                 if check_trackers_list and not any(
-                    any(check_str in url for check_str in check_trackers_list) for url in torrent["trackers"]
+                    any(check_str in url for check_str in check_trackers_list) for url in torrent.trackers
                 ):
                     continue
 
                 # Filter MP3 files (based on configuration)
                 if config.cfg.global_config.exclude_mp3:
-                    has_mp3 = any(posixpath.splitext(file["name"])[1].lower() == ".mp3" for file in torrent["files"])
+                    has_mp3 = any(posixpath.splitext(file.name)[1].lower() == ".mp3" for file in torrent.files)
                     if has_mp3:
                         continue
 
@@ -158,18 +181,18 @@ class TorrentClient(ABC):
                 if config.cfg.global_config.check_music_only:
                     music_extensions = [".flac", ".mp3", ".dsf", ".dff", ".m4a"]
                     has_music = any(
-                        posixpath.splitext(file["name"])[1].lower() in music_extensions for file in torrent["files"]
+                        posixpath.splitext(file.name)[1].lower() in music_extensions for file in torrent.files
                     )
                     if not has_music:
                         continue
 
-                content_name = torrent["name"]
+                content_name = torrent.name
 
                 # Record which trackers this content exists on
                 if content_name not in content_tracker_mapping:
                     content_tracker_mapping[content_name] = set()
 
-                for tracker_url in torrent["trackers"]:
+                for tracker_url in torrent.trackers:
                     for target_tracker in target_trackers:
                         if target_tracker in tracker_url:
                             content_tracker_mapping[content_name].add(target_tracker)
@@ -180,9 +203,8 @@ class TorrentClient(ABC):
                 else:
                     # Choose version with fewer files or smaller size
                     existing = valid_torrents[content_name]
-                    if len(torrent["files"]) < len(existing["files"]) or (
-                        len(torrent["files"]) == len(existing["files"])
-                        and torrent["total_size"] < existing["total_size"]
+                    if len(torrent.files) < len(existing.files) or (
+                        len(torrent.files) == len(existing.files) and torrent.total_size < existing.total_size
                     ):
                         valid_torrents[content_name] = torrent
 
@@ -202,15 +224,17 @@ class TorrentClient(ABC):
                     continue
 
                 # Otherwise include in results
-                filtered_torrents[content_name] = {
-                    "hash": torrent["hash"],
-                    "percent_done": torrent["percent_done"],
-                    "total_size": torrent["total_size"],
-                    "files": torrent["files"],
-                    "trackers": torrent["trackers"],
-                    "download_dir": torrent["download_dir"],
-                    "existing_target_trackers": list(existing_trackers),  # Record existing target trackers
-                }
+                filtered_torrents[content_name] = ClientTorrentInfo(
+                    id=torrent.id,
+                    name=content_name,
+                    hash=torrent.hash,
+                    percent_done=torrent.percent_done,
+                    total_size=torrent.total_size,
+                    files=torrent.files,
+                    trackers=torrent.trackers,
+                    download_dir=torrent.download_dir,
+                    existing_target_trackers=list(existing_trackers),  # Record existing target trackers
+                )
 
             return filtered_torrents
 
@@ -437,11 +461,11 @@ class TransmissionClient(TorrentClient):
             password=parsed.get("password"),
         )
 
-    def get_torrents(self) -> list[dict[str, Any]]:
+    def get_torrents(self) -> list[ClientTorrentInfo]:
         """Get all torrents from Transmission.
 
         Returns:
-            list[dict[str, Any]]: List of torrent information.
+            list[ClientTorrentInfo]: List of torrent information.
         """
         try:
             torrents = self.client.get_torrents()
@@ -449,16 +473,16 @@ class TransmissionClient(TorrentClient):
 
             for torrent in torrents:
                 result.append(
-                    {
-                        "id": torrent.id,
-                        "name": torrent.name,
-                        "hash": torrent.hash_string,
-                        "percent_done": torrent.percent_done,
-                        "total_size": torrent.total_size,
-                        "files": torrent.fields["files"],
-                        "trackers": torrent.tracker_list,
-                        "download_dir": torrent.download_dir,
-                    }
+                    ClientTorrentInfo(
+                        id=torrent.id,
+                        name=torrent.name,
+                        hash=torrent.hash_string,
+                        percent_done=torrent.percent_done,
+                        total_size=torrent.total_size,
+                        files=[ClientTorrentFile(name=f["name"], size=f["length"]) for f in torrent.fields["files"]],
+                        trackers=torrent.tracker_list,
+                        download_dir=torrent.download_dir,
+                    )
                 )
 
             return result
@@ -556,7 +580,7 @@ class QBittorrentClient(TorrentClient):
         # Authenticate with qBittorrent
         self.client.auth_log_in()
 
-    def get_torrents(self) -> list[dict[str, Any]]:
+    def get_torrents(self) -> list[ClientTorrentInfo]:
         """Get all torrents from qBittorrent."""
         try:
             torrents = self.client.torrents_info()
@@ -570,16 +594,16 @@ class QBittorrentClient(TorrentClient):
                 tracker_urls = [tracker.url for tracker in trackers]
 
                 result.append(
-                    {
-                        "id": torrent.hash,
-                        "name": torrent.name,
-                        "hash": torrent.hash,
-                        "percent_done": torrent.progress,
-                        "total_size": torrent.size,
-                        "files": [{"name": f.name, "length": f.size} for f in files],
-                        "trackers": tracker_urls,
-                        "download_dir": torrent.save_path,
-                    }
+                    ClientTorrentInfo(
+                        id=torrent.hash,
+                        name=torrent.name,
+                        hash=torrent.hash,
+                        percent_done=torrent.progress,
+                        total_size=torrent.size,
+                        files=[ClientTorrentFile(name=f.name, size=f.size) for f in files],
+                        trackers=tracker_urls,
+                        download_dir=torrent.save_path,
+                    )
                 )
 
             return result
@@ -666,7 +690,7 @@ class DelugeClient(TorrentClient):
         # Connect to Deluge daemon
         self.client.connect()
 
-    def get_torrents(self) -> list[dict[str, Any]]:
+    def get_torrents(self) -> list[ClientTorrentInfo]:
         """Get all torrents from Deluge."""
         try:
             torrent_ids = self.client.call("core.get_torrents_status", {}, [])
@@ -674,16 +698,16 @@ class DelugeClient(TorrentClient):
 
             for torrent_id, torrent_info in torrent_ids.items():
                 result.append(
-                    {
-                        "id": torrent_id,
-                        "name": torrent_info["name"],
-                        "hash": torrent_info["hash"],
-                        "percent_done": torrent_info["progress"] / 100.0,
-                        "total_size": torrent_info["total_size"],
-                        "files": [{"name": f["path"], "length": f["size"]} for f in torrent_info["files"]],
-                        "trackers": [t["url"] for t in torrent_info["trackers"]],
-                        "download_dir": torrent_info["save_path"],
-                    }
+                    ClientTorrentInfo(
+                        id=torrent_id,
+                        name=torrent_info["name"],
+                        hash=torrent_info["hash"],
+                        percent_done=torrent_info["progress"] / 100.0,
+                        total_size=torrent_info["total_size"],
+                        files=[ClientTorrentFile(name=f["path"], size=f["size"]) for f in torrent_info["files"]],
+                        trackers=[t["url"] for t in torrent_info["trackers"]],
+                        download_dir=torrent_info["save_path"],
+                    )
                 )
 
             return result
