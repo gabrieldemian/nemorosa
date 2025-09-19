@@ -2,6 +2,7 @@
 
 import base64
 import logging
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -42,12 +43,37 @@ class AnnounceRequest(BaseModel):
 # Global variables
 app_logger: logging.Logger | None = None
 target_apis: list | None = None
+job_manager: scheduler.JobManager | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan event handler for FastAPI app."""
+    global job_manager, app_logger, target_apis
+
+    # Startup
+    if job_manager and target_apis:
+        # Create torrent client for scheduler
+        torrent_client = create_torrent_client(config.cfg.downloader.client)
+
+        # Start scheduler
+        await job_manager.start_scheduler(target_apis, torrent_client)
+        app_logger.info("Scheduler started with configured jobs")
+
+    yield
+
+    # Shutdown
+    if job_manager:
+        job_manager.stop_scheduler()
+        app_logger.info("Scheduler stopped")
+
 
 # Create FastAPI app
 app = FastAPI(
     title="Nemorosa Web Server",
     description="Music torrent cross-seeding tool with automatic file mapping and seamless injection",
     version="0.0.1",
+    lifespan=lifespan,
 )
 
 # Security
@@ -236,6 +262,14 @@ async def trigger_job(
         # Trigger the job
         result = await job_mgr.trigger_job_early(job_type_enum)
 
+        # Map internal status to HTTP status codes
+        if result["status"] == "not_found":
+            raise HTTPException(status_code=404, detail=result["message"])
+        elif result["status"] == "conflict":
+            raise HTTPException(status_code=409, detail=result["message"])
+        elif result["status"] == "error":
+            raise HTTPException(status_code=500, detail=result["message"])
+
         return JobResponse(
             status=result["status"],
             message=result["message"],
@@ -314,7 +348,7 @@ def run_webserver(
         log_level: Log level
         target_apis: List of target API connections
     """
-    global app_logger
+    global app_logger, job_manager
 
     # Use config values if not provided
     if host is None:
@@ -322,8 +356,9 @@ def run_webserver(
     if port is None:
         port = config.cfg.server.port
 
-    # Set global target_apis
+    # Set global variables
     globals()["target_apis"] = target_apis
+    job_manager = scheduler.get_job_manager()
 
     # Set up logger
     app_logger = logger.generate_logger(log_level)
@@ -341,30 +376,19 @@ def run_webserver(
     else:
         app_logger.info("API key authentication disabled")
 
-    # Initialize scheduler if any jobs are configured
-    job_mgr = scheduler.get_job_manager()
+    # Check if scheduler should be initialized
     if any(
         [
             config.cfg.server.search_cadence,
             config.cfg.server.cleanup_cadence,
         ]
     ):
-        # Create torrent client for scheduler
-        torrent_client = create_torrent_client(config.cfg.downloader.client)
-
-        # Start scheduler
-        job_mgr.start_scheduler(target_apis, torrent_client)
-        app_logger.info("Scheduler started with configured jobs")
+        app_logger.info("Scheduler will be started with configured jobs")
     else:
         app_logger.info("No scheduled jobs configured")
 
     # Import uvicorn here to avoid import issues
     import uvicorn
 
-    try:
-        # Run server
-        uvicorn.run("nemorosa.webserver:app", host=host, port=port, log_level=log_level, reload=False)
-    finally:
-        # Stop scheduler when server stops
-        job_mgr.stop_scheduler()
-        app_logger.info("Scheduler stopped")
+    # Run server
+    uvicorn.run("nemorosa.webserver:app", host=host, port=port, log_level=log_level, reload=False)

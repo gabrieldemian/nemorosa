@@ -1,10 +1,10 @@
 """Scheduler module for nemorosa."""
 
-import re
 from datetime import datetime
 from enum import Enum
 from typing import Any
 
+import humanfriendly
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from . import config, db, logger
@@ -25,82 +25,11 @@ class JobManager:
         """Initialize job manager."""
         self.scheduler = AsyncIOScheduler()
         self.logger = logger.get_logger()
-        self.job_log_db = db.get_database()
-        self._setup_job_log_table()
+        self.database = db.get_database()
+        # Flag to track if search job was manually triggered
+        self.search_job_manually_triggered = False
 
-    def _setup_job_log_table(self):
-        """Set up job log table in database."""
-        try:
-            # Create job_log table if it doesn't exist
-            self.job_log_db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS job_log (
-                    job_name TEXT PRIMARY KEY,
-                    last_run INTEGER,
-                    next_run INTEGER,
-                    run_count INTEGER DEFAULT 0
-                )
-                """
-            )
-            self.job_log_db.commit()
-        except Exception as e:
-            self.logger.error(f"Failed to setup job_log table: {e}")
-
-    async def get_job_last_run(self, job_name: str) -> int | None:
-        """Get last run timestamp for a job.
-
-        Args:
-            job_name: Name of the job.
-
-        Returns:
-            Last run timestamp in seconds since epoch, or None if never run.
-        """
-        try:
-            cursor = self.job_log_db.execute("SELECT last_run FROM job_log WHERE job_name = ?", (job_name,))
-            result = cursor.fetchone()
-            return result[0] if result else None
-        except Exception as e:
-            self.logger.error(f"Failed to get last run for job {job_name}: {e}")
-            return None
-
-    async def update_job_run(self, job_name: str, last_run: int, next_run: int | None = None):
-        """Update job run information.
-
-        Args:
-            job_name: Name of the job.
-            last_run: Last run timestamp in seconds since epoch.
-            next_run: Next run timestamp in seconds since epoch, or None.
-        """
-        try:
-            self.job_log_db.execute(
-                """
-                INSERT OR REPLACE INTO job_log (job_name, last_run, next_run, run_count)
-                VALUES (?, ?, ?, COALESCE((SELECT run_count FROM job_log WHERE job_name = ?), 0) + 1)
-                """,
-                (job_name, last_run, next_run, job_name),
-            )
-            self.job_log_db.commit()
-        except Exception as e:
-            self.logger.error(f"Failed to update job run for {job_name}: {e}")
-
-    async def get_job_run_count(self, job_name: str) -> int:
-        """Get run count for a job.
-
-        Args:
-            job_name: Name of the job.
-
-        Returns:
-            Number of times the job has run.
-        """
-        try:
-            cursor = self.job_log_db.execute("SELECT run_count FROM job_log WHERE job_name = ?", (job_name,))
-            result = cursor.fetchone()
-            return result[0] if result else 0
-        except Exception as e:
-            self.logger.error(f"Failed to get run count for job {job_name}: {e}")
-            return 0
-
-    def start_scheduler(self, target_apis: list, torrent_client: Any):
+    async def start_scheduler(self, target_apis: list, torrent_client: Any):
         """Start the scheduler with configured jobs.
 
         Args:
@@ -128,14 +57,15 @@ class JobManager:
 
             # Parse cadence string (e.g., "1 day", "6 hours", "30 minutes")
             cadence = config.cfg.server.search_cadence
-            interval = self._parse_cadence(cadence)
+            interval = humanfriendly.parse_timespan(cadence)
 
             self.scheduler.add_job(
                 self._run_search_job,
-                trigger=IntervalTrigger(**interval),
+                trigger=IntervalTrigger(seconds=interval),
                 id=JobType.SEARCH.value,
                 name="Search Job",
                 max_instances=1,
+                coalesce=True,
                 replace_existing=True,
             )
             self.logger.info(f"Added search job with cadence: {cadence}")
@@ -149,11 +79,11 @@ class JobManager:
 
             # Parse cadence string
             cadence = config.cfg.server.cleanup_cadence
-            interval = self._parse_cadence(cadence)
+            interval = humanfriendly.parse_timespan(cadence)
 
             self.scheduler.add_job(
                 self._run_cleanup_job,
-                trigger=IntervalTrigger(**interval),
+                trigger=IntervalTrigger(seconds=interval),
                 id=JobType.CLEANUP.value,
                 name="Cleanup Job",
                 max_instances=1,
@@ -163,44 +93,43 @@ class JobManager:
         except Exception as e:
             self.logger.error(f"Failed to add cleanup job: {e}")
 
-    def _parse_cadence(self, cadence: str) -> dict[str, int]:
-        """Parse cadence string into interval parameters.
+    async def _run_search_job(self, is_manual_trigger: bool = False):
+        """Run search job.
 
         Args:
-            cadence: Cadence string (e.g., "1 day", "6 hours", "30 minutes").
-
-        Returns:
-            Dictionary with interval parameters.
-
-        Raises:
-            ValueError: If cadence string is invalid.
+            is_manual_trigger: True if triggered manually, False if triggered by scheduler
         """
-        # Parse patterns like "1 day", "6 hours", "30 minutes", "2 weeks"
-        patterns = [
-            (r"(\d+)\s*weeks?", {"weeks": 1}),
-            (r"(\d+)\s*days?", {"days": 1}),
-            (r"(\d+)\s*hours?", {"hours": 1}),
-            (r"(\d+)\s*minutes?", {"minutes": 1}),
-            (r"(\d+)\s*seconds?", {"seconds": 1}),
-        ]
-
-        for pattern, unit in patterns:
-            match = re.match(pattern, cadence.lower().strip())
-            if match:
-                value = int(match.group(1))
-                return {k: v * value for k, v in unit.items()}
-
-        raise ValueError(f"Invalid cadence format: {cadence}")
-
-    async def _run_search_job(self):
-        """Run search job."""
         job_name = JobType.SEARCH.value
+
+        # Check if job should be skipped due to recent manual trigger (only for scheduled runs)
+        if not is_manual_trigger and self.search_job_manually_triggered:
+            self.logger.info(f"Skipping {job_name} job - job was manually triggered recently")
+            self.search_job_manually_triggered = False
+            return
+
         self.logger.info(f"Starting {job_name} job")
 
         try:
             # Record job start
             start_time = int(datetime.now().timestamp())
-            await self.update_job_run(job_name, start_time)
+
+            # Get next run time from APScheduler
+            next_run_time = None
+            job = self.scheduler.get_job(JobType.SEARCH.value)
+            if job and job.next_run_time:
+                if is_manual_trigger:
+                    # For manual trigger, get the time after the next scheduled run
+                    # (skip the next scheduled run due to manual trigger flag)
+                    next_run_time = int(job.next_run_time.timestamp())
+                    # Add one more interval to get the run after the skipped one
+                    if config.cfg.server.search_cadence:
+                        cadence_seconds = humanfriendly.parse_timespan(config.cfg.server.search_cadence)
+                        next_run_time += cadence_seconds
+                else:
+                    # For scheduled run, get the normal next run time
+                    next_run_time = int(job.next_run_time.timestamp())
+
+            self.database.update_job_run(job_name, start_time, next_run_time)
 
             # Run the actual search process
             processor = NemorosaCore(self.torrent_client, self.target_apis)
@@ -221,7 +150,14 @@ class JobManager:
         try:
             # Record job start
             start_time = int(datetime.now().timestamp())
-            await self.update_job_run(job_name, start_time)
+
+            # Get next run time from APScheduler
+            next_run_time = None
+            job = self.scheduler.get_job(JobType.CLEANUP.value)
+            if job and job.next_run_time:
+                next_run_time = int(job.next_run_time.timestamp())
+
+            self.database.update_job_run(job_name, start_time, next_run_time)
 
             # Run cleanup process
             processor = NemorosaCore(self.torrent_client, self.target_apis)
@@ -247,31 +183,25 @@ class JobManager:
         self.logger.info(f"Triggering {job_name} job early")
 
         try:
-            # Check if job is currently running
-            running_jobs = [job.id for job in self.scheduler.get_jobs() if job.next_run_time]
-            if job_name in running_jobs:
+            # Check if job exists and is enabled
+            job = self.scheduler.get_job(job_name)
+            if not job:
+                self.logger.warning(f"Job {job_name} not found or not enabled")
                 return {
-                    "status": "error",
-                    "message": f"Job {job_name} is already running",
+                    "status": "not_found",
+                    "message": f"Job {job_name} not found or not enabled",
                     "job_name": job_name,
                 }
 
-            # Trigger the job
+            # Trigger the job directly
             if job_type == JobType.SEARCH:
-                await self._run_search_job()
+                # Set flag to skip next scheduled run
+                self.search_job_manually_triggered = True
+                await self._run_search_job(is_manual_trigger=True)
             elif job_type == JobType.CLEANUP:
                 await self._run_cleanup_job()
 
-            # For search jobs, delay the next scheduled run
-            if job_type == JobType.SEARCH:
-                # Get the job and modify its next run time
-                job = self.scheduler.get_job(job_name)
-                if job:
-                    # Calculate double cadence delay
-                    # This is a simplified approach - in practice, you'd need to
-                    # modify the trigger or reschedule the job
-                    pass
-
+            self.logger.info(f"Successfully triggered {job_name} job")
             return {
                 "status": "success",
                 "message": f"Job {job_name} triggered successfully",
@@ -305,11 +235,17 @@ class JobManager:
                 "job_name": job_name,
             }
 
+        # Get last run time from database
+        last_run_timestamp = self.database.get_job_last_run(job_name)
+        last_run = None
+        if last_run_timestamp:
+            last_run = datetime.fromtimestamp(last_run_timestamp).isoformat()
+
         return {
             "status": "active",
             "job_name": job_name,
             "next_run": job.next_run_time.isoformat() if job.next_run_time else None,
-            "last_run": None,  # Would need to get from database
+            "last_run": last_run,
         }
 
     def stop_scheduler(self):

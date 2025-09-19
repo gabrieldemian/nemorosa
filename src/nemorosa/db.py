@@ -89,6 +89,17 @@ class TorrentDatabase:
                 )
             """)
 
+            # Job log table - for scheduler job tracking
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS job_log (
+                    job_name TEXT PRIMARY KEY,
+                    last_run TIMESTAMP,
+                    next_run TIMESTAMP,
+                    run_count INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
             # Create indexes to improve query performance
             conn.execute("CREATE INDEX IF NOT EXISTS idx_scan_results_time ON scan_results(scanned_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_scan_results_torrent_id ON scan_results(torrent_id)")
@@ -196,6 +207,53 @@ class TorrentDatabase:
                 "DELETE FROM undownloaded_torrents WHERE torrent_id = ? AND site_host = ?",
                 (torrent_id, site_host),
             )
+
+    # ================== Job log related methods ==================
+
+    def get_job_last_run(self, job_name: str) -> int | None:
+        """Get last run timestamp for a job.
+
+        Args:
+            job_name (str): Name of the job.
+
+        Returns:
+            int | None: Last run timestamp in seconds since epoch, or None if never run.
+        """
+        with self.connection as conn:
+            cursor = conn.execute("SELECT last_run FROM job_log WHERE job_name = ?", (job_name,))
+            result = cursor.fetchone()
+            return result[0] if result else None
+
+    def update_job_run(self, job_name: str, last_run: int, next_run: int | None = None):
+        """Update job run information.
+
+        Args:
+            job_name (str): Name of the job.
+            last_run (int): Last run timestamp in seconds since epoch.
+            next_run (int | None): Next run timestamp in seconds since epoch, or None.
+        """
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO job_log (job_name, last_run, next_run, run_count)
+                VALUES (?, ?, ?, COALESCE((SELECT run_count FROM job_log WHERE job_name = ?), 0) + 1)
+                """,
+                (job_name, last_run, next_run, job_name),
+            )
+
+    def get_job_run_count(self, job_name: str) -> int:
+        """Get run count for a job.
+
+        Args:
+            job_name (str): Name of the job.
+
+        Returns:
+            int: Number of times the job has run.
+        """
+        with self.connection as conn:
+            cursor = conn.execute("SELECT run_count FROM job_log WHERE job_name = ?", (job_name,))
+            result = cursor.fetchone()
+            return result[0] if result else 0
 
     def close(self):
         """Close database connection."""

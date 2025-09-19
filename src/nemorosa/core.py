@@ -264,6 +264,7 @@ class NemorosaCore:
         Returns:
             int: Torrent ID if found, -1 otherwise.
         """
+        tid = -1
         self.logger.debug(f"No size match found. Checking file contents for '{fname_query}'")
         for t_index, t in enumerate(torrents, 1):
             self.logger.debug(f"Checking torrent #{t_index}/{len(torrents)}: ID {t['torrentId']}")

@@ -7,3 +7,4 @@ results/
 .cursor/
 config.yml
 test
+pyrightconfig.json
