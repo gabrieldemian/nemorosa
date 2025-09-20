@@ -5,11 +5,11 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
-from . import config, logger, scheduler
+from . import api, config, logger, scheduler
 from .core import NemorosaCore
 from .torrent_client import create_torrent_client
 
@@ -42,7 +42,7 @@ class AnnounceRequest(BaseModel):
 
 # Global variables
 app_logger: logging.Logger | None = None
-target_apis: list | None = None
+target_apis: list[api.GazelleJSONAPI | api.GazelleParser] | None = None
 job_manager: scheduler.JobManager | None = None
 
 
@@ -88,8 +88,8 @@ def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)
         # No API key configured, allow all requests
         return True
 
-    if credentials.credentials != api_key:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+    if not credentials or credentials.credentials != api_key:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
 
     return True
 
@@ -136,7 +136,7 @@ async def webhook(infoHash: str = Query(..., description="Torrent infohash"), _:
     """
     # Validate infoHash is not empty
     if not infoHash or not infoHash.strip():
-        raise HTTPException(status_code=400, detail="infoHash cannot be empty")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="infoHash cannot be empty")
 
     try:
         # Create torrent client using global config
@@ -157,7 +157,9 @@ async def webhook(infoHash: str = Query(..., description="Torrent infohash"), _:
         if app_logger:
             app_logger.error(f"Error processing torrent {infoHash}: {str(e)}")
 
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") from e
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal server error: {str(e)}"
+        ) from e
 
 
 @app.post("/api/announce", response_model=WebhookResponse)
@@ -179,19 +181,21 @@ async def announce(
     """
     # Validate request data
     if not request.name or not request.name.strip():
-        raise HTTPException(status_code=400, detail="Torrent name cannot be empty")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Torrent name cannot be empty")
 
     if not request.link or not request.link.strip():
-        raise HTTPException(status_code=400, detail="Torrent link cannot be empty")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Torrent link cannot be empty")
 
     if not request.torrentdata or not request.torrentdata.strip():
-        raise HTTPException(status_code=400, detail="Torrent data cannot be empty")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Torrent data cannot be empty")
 
     try:
         try:
             torrent_bytes = base64.b64decode(request.torrentdata)
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Invalid base64 torrent data: {str(e)}") from e
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid base64 torrent data: {str(e)}"
+            ) from e
 
         # Create torrent client using global config
         torrent_client = create_torrent_client(config.cfg.downloader.client)
@@ -227,7 +231,9 @@ async def announce(
         if app_logger:
             app_logger.error(f"Error processing torrent announce {request.name}: {str(e)}")
 
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") from e
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal server error: {str(e)}"
+        ) from e
 
 
 @app.post("/api/job", response_model=JobResponse)
@@ -248,7 +254,7 @@ async def trigger_job(
     valid_job_types = ["search", "cleanup"]
     if job_type not in valid_job_types:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid job type '{job_type}'. Must be one of: {valid_job_types}",
         )
 
@@ -264,11 +270,11 @@ async def trigger_job(
 
         # Map internal status to HTTP status codes
         if result["status"] == "not_found":
-            raise HTTPException(status_code=404, detail=result["message"])
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=result["message"])
         elif result["status"] == "conflict":
-            raise HTTPException(status_code=409, detail=result["message"])
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=result["message"])
         elif result["status"] == "error":
-            raise HTTPException(status_code=500, detail=result["message"])
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=result["message"])
 
         return JobResponse(
             status=result["status"],
@@ -277,12 +283,14 @@ async def trigger_job(
         )
 
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid job type: {str(e)}") from e
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid job type: {str(e)}") from e
     except Exception as e:
         if app_logger:
             app_logger.error(f"Error triggering job {job_type}: {str(e)}")
 
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") from e
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal server error: {str(e)}"
+        ) from e
 
 
 @app.get("/api/job/{job_type}", response_model=JobResponse)
@@ -303,7 +311,7 @@ async def get_job_status(
     valid_job_types = ["search", "cleanup"]
     if job_type not in valid_job_types:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid job type '{job_type}'. Must be one of: {valid_job_types}",
         )
 
@@ -326,19 +334,21 @@ async def get_job_status(
         )
 
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid job type: {str(e)}") from e
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid job type: {str(e)}") from e
     except Exception as e:
         if app_logger:
             app_logger.error(f"Error getting job status for {job_type}: {str(e)}")
 
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") from e
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal server error: {str(e)}"
+        ) from e
 
 
 def run_webserver(
     host: str | None = None,
     port: int | None = None,
     log_level: str = "info",
-    target_apis: list | None = None,
+    target_apis: list[api.GazelleJSONAPI | api.GazelleParser] | None = None,
 ):
     """Run the web server.
 

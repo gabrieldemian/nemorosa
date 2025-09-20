@@ -8,6 +8,7 @@ import os
 import sqlite3
 import threading
 from contextlib import contextmanager, suppress
+from typing import Any
 
 from . import config
 
@@ -149,14 +150,14 @@ class TorrentDatabase:
 
     # ================== Undownloaded torrents related methods ==================
 
-    def load_undownloaded_torrents(self, site_host: str = "default") -> dict[str, dict]:
+    def load_undownloaded_torrents(self, site_host: str = "default") -> dict[str, dict[str, Any]]:
         """Load undownloaded torrent information for specified site.
 
         Args:
             site_host (str): Site hostname, defaults to 'default'.
 
         Returns:
-            dict: Mapping dictionary from torrent ID to detailed information.
+            dict[str, dict[str, Any]]: Mapping dictionary from torrent ID to detailed information.
         """
         with self.connection as conn:
             cursor = conn.execute(

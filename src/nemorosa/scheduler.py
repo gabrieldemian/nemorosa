@@ -4,11 +4,12 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-import humanfriendly
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 
-from . import config, db, logger
+from . import api, config, db, logger
 from .core import NemorosaCore
+from .torrent_client import TorrentClient
 
 
 class JobType(Enum):
@@ -29,7 +30,9 @@ class JobManager:
         # Flag to track if search job was manually triggered
         self.search_job_manually_triggered = False
 
-    async def start_scheduler(self, target_apis: list, torrent_client: Any):
+    async def start_scheduler(
+        self, target_apis: list[api.GazelleJSONAPI | api.GazelleParser], torrent_client: TorrentClient
+    ):
         """Start the scheduler with configured jobs.
 
         Args:
@@ -40,7 +43,7 @@ class JobManager:
         self.torrent_client = torrent_client
 
         # Add search job if configured
-        if config.cfg.server.search_cadence:
+        if config.cfg.server.search_cadence_seconds:
             self._add_search_job()
 
         # Add cleanup job
@@ -53,11 +56,7 @@ class JobManager:
     def _add_search_job(self):
         """Add search job to scheduler."""
         try:
-            from apscheduler.triggers.interval import IntervalTrigger
-
-            # Parse cadence string (e.g., "1 day", "6 hours", "30 minutes")
-            cadence = config.cfg.server.search_cadence
-            interval = humanfriendly.parse_timespan(cadence)
+            interval = config.cfg.server.search_cadence_seconds
 
             self.scheduler.add_job(
                 self._run_search_job,
@@ -68,18 +67,14 @@ class JobManager:
                 coalesce=True,
                 replace_existing=True,
             )
-            self.logger.info(f"Added search job with cadence: {cadence}")
+            self.logger.info(f"Added search job with cadence: {config.cfg.server.search_cadence}")
         except Exception as e:
             self.logger.error(f"Failed to add search job: {e}")
 
     def _add_cleanup_job(self):
         """Add cleanup job to scheduler."""
         try:
-            from apscheduler.triggers.interval import IntervalTrigger
-
-            # Parse cadence string
-            cadence = config.cfg.server.cleanup_cadence
-            interval = humanfriendly.parse_timespan(cadence)
+            interval = config.cfg.server.cleanup_cadence_seconds
 
             self.scheduler.add_job(
                 self._run_cleanup_job,
@@ -89,7 +84,7 @@ class JobManager:
                 max_instances=1,
                 replace_existing=True,
             )
-            self.logger.info(f"Added cleanup job with cadence: {cadence}")
+            self.logger.info(f"Added cleanup job with cadence: {config.cfg.server.cleanup_cadence}")
         except Exception as e:
             self.logger.error(f"Failed to add cleanup job: {e}")
 
@@ -122,8 +117,8 @@ class JobManager:
                     # (skip the next scheduled run due to manual trigger flag)
                     next_run_time = int(job.next_run_time.timestamp())
                     # Add one more interval to get the run after the skipped one
-                    if config.cfg.server.search_cadence:
-                        cadence_seconds = humanfriendly.parse_timespan(config.cfg.server.search_cadence)
+                    if config.cfg.server.search_cadence_seconds:
+                        cadence_seconds = config.cfg.server.search_cadence_seconds
                         next_run_time += cadence_seconds
                 else:
                     # For scheduled run, get the normal next run time

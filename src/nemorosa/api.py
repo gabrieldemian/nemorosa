@@ -6,7 +6,6 @@ from urllib.parse import parse_qs, urljoin, urlparse
 import humanfriendly
 import msgspec
 import requests
-import torf
 from bs4 import BeautifulSoup, Tag
 
 from . import logger
@@ -148,9 +147,6 @@ class GazelleBase:
                     raise RequestException
 
                 self.logger.debug(f"Torrent {torrent_id} downloaded successfully")
-
-                # Check and modify source flag
-                # modified_content = self._check_and_modify_source_flag(response.content)
                 return response.content
             except Exception as e:
                 if attempt < max_retries - 1:
@@ -281,47 +277,7 @@ class GazelleBase:
             response = self.session.post(full_url, data=data, params=params)
         else:
             raise ValueError("Unsupported HTTP method")
-
         return response
-
-    def _check_and_modify_source_flag(self, torrent_content: bytes) -> bytes:
-        """Check and modify the source flag of a torrent.
-
-        Args:
-            torrent_content: Byte content of the torrent file.
-
-        Returns:
-            Modified torrent file byte content.
-        """
-        try:
-            # Load torrent content using torf
-            torrent = torf.Torrent.read_stream(torrent_content)
-
-            # Get current source flag (if exists)
-            current_source = torrent.source
-
-            expected_source = TRACKER_SPECS[self.server].source_flag
-
-            # If source flag doesn't match, modify it
-            if current_source != expected_source:
-                self.logger.info(
-                    f"Modifying source flag from '{current_source}' to '{expected_source}' for server {self.server}"
-                )
-                torrent.source = expected_source
-                modified_content = torrent.dump()
-
-                return modified_content
-            else:
-                self.logger.debug(
-                    f"Source flag '{current_source}' already matches expected '{expected_source}' "
-                    f"for server {self.server}"
-                )
-                return torrent_content
-
-        except Exception as e:
-            self.logger.error(f"Error checking/modifying source flag: {e}")
-            # Return original content on error
-            return torrent_content
 
 
 class GazelleJSONAPI(GazelleBase):
@@ -638,13 +594,13 @@ TRACKER_SPECS = {
 }
 
 
-def get_api_instance(server, cookies=None, api_key=None):
+def get_api_instance(server: str, cookies: dict | None = None, api_key: str | None = None):
     """Get appropriate API instance based on server address.
 
     Args:
         server (str): Server address.
-        cookies (optional): Optional cookies.
-        api_key (str, optional): Optional API key.
+        cookies (dict | None): Optional cookies.
+        api_key (str | None): Optional API key.
 
     Returns:
         GazelleBase: API instance.

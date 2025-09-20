@@ -1,10 +1,8 @@
 """Core processing functions for nemorosa."""
 
-import posixpath
-import re
 import traceback
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import torf
 
@@ -36,42 +34,6 @@ class NemorosaCore:
             "removed": 0,
         }
         self.logger = logger.get_logger()
-
-    @staticmethod
-    def make_filename_query(filename):
-        """Generate cleaned search query string from filename.
-
-        Features:
-        1. Remove path part, keep only filename
-        2. Replace garbled characters with equal-length spaces
-        3. Merge consecutive spaces into single space
-
-        Args:
-            filename (str): Original filename.
-
-        Returns:
-            str: Cleaned filename, returns None if unable to process.
-        """
-
-        # Remove path part, keep only filename
-        base_filename = posixpath.basename(filename)
-
-        # Replace common garbled characters and special symbols with equal-length spaces
-        # Including: question marks, Chinese question marks, consecutive underscores, brackets, etc.
-        sanitized_name = base_filename
-
-        # Replace common garbled characters and invisible characters with equal-length spaces
-        # Including zero-width spaces, control characters, and other invisible Unicode characters
-        sanitized_name = re.sub(
-            r'[?？�_\-\.·~`!@#$%^&*+=|\\:";\'<>?,/\u200b\u200c\u200d\u2060\ufeff\u00a0\u180e\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\u0000-\u001f\u007f-\u009f]',
-            " ",
-            sanitized_name,
-        )
-
-        # Finally merge consecutive multiple spaces into single space
-        sanitized_name = re.sub(r"\s+", " ", sanitized_name).strip()
-
-        return sanitized_name
 
     def hash_based_search(
         self,
@@ -153,13 +115,7 @@ class NemorosaCore:
         scan_querys = []
         max_fnames = sorted(fdict.keys(), key=lambda fname: len(fname), reverse=True)
         for index, fname in enumerate(max_fnames):
-            if index == 0 or posixpath.splitext(fname)[1] in [
-                ".flac",
-                ".mp3",
-                ".dsf",
-                ".dff",
-                ".m4a",
-            ]:
+            if index == 0 or filecompare.is_music_file(fname):
                 scan_querys.append(fname)
             if len(scan_querys) >= 5:
                 break
@@ -177,14 +133,8 @@ class NemorosaCore:
             self.logger.debug(f"Found {len(torrents)} potential matches for file '{fname_query}'")
 
             # If no results found and it's a music file, try make filename query and search again
-            if len(torrents) == 0 and posixpath.splitext(fname)[1] in [
-                ".flac",
-                ".mp3",
-                ".dsf",
-                ".dff",
-                ".m4a",
-            ]:
-                fname_query = self.make_filename_query(fname)
+            if len(torrents) == 0 and filecompare.is_music_file(fname):
+                fname_query = filecompare.make_filename_query(fname)
                 if fname_query != fname:
                     self.logger.debug(
                         f"No results found for '{fname}', trying fallback search with basename: '{fname_query}'"
@@ -235,11 +185,101 @@ class NemorosaCore:
                 break
 
             self.logger.debug(f"No more results for file '{fname}'")
-            if posixpath.splitext(fname)[1] in [".flac", ".mp3", ".dsf", ".dff", ".m4a"]:
+            if filecompare.is_music_file(fname):
                 self.logger.debug("Stopping search as music file match is not found")
                 break
 
         return tid
+
+    def _search_torrent_by_filename_in_client(
+        self, torrent_fdict: dict, all_torrents: list[ClientTorrentInfo]
+    ) -> list[ClientTorrentInfo]:
+        """Search for matching torrents in client by filename.
+
+        Args:
+            torrent_fdict (dict): File dictionary of the incoming torrent.
+            all_torrents (list): List of all ClientTorrentInfo objects from torrent client.
+
+        Returns:
+            list: List of matching ClientTorrentInfo objects.
+        """
+        try:
+            matched_torrents = []
+
+            # Get incoming torrent file list, sorted by filename length (longest first)
+            torrent_files = sorted(torrent_fdict.keys(), key=lambda fname: len(fname), reverse=True)
+
+            # Select top 5 longest filenames for search
+            scan_queries = []
+            for index, fname in enumerate(torrent_files):
+                if index == 0 or filecompare.is_music_file(fname):
+                    scan_queries.append(fname)
+                if len(scan_queries) >= 5:
+                    break
+
+            self.logger.debug(f"Searching with {len(scan_queries)} file queries: {scan_queries}")
+
+            for fname in scan_queries:
+                self.logger.debug(f"Searching for file: {fname}")
+
+                # Use make_filename_query to process filename
+                fname_query = filecompare.make_filename_query(fname)
+                if not fname_query:
+                    continue
+
+                # Search for matching files in all torrents in client
+                for torrent in all_torrents:
+                    # Use client's file dictionary
+                    client_fdict = torrent.fdict
+
+                    # Check if any file contains all space-separated search query words
+                    fname_query_words = fname_query.split()
+                    matching_files = []
+
+                    for client_file in client_fdict:
+                        # Check if all query words are in filename
+                        if all(word in client_file for word in fname_query_words):
+                            matching_files.append(client_file)
+
+                    if matching_files:
+                        self.logger.debug(f"Found {len(matching_files)} matching files in torrent: {torrent.name}")
+
+                        # Check if file size matches
+                        size_match_found = False
+                        for matching_file in matching_files:
+                            if (
+                                matching_file in client_fdict
+                                and fname in torrent_fdict
+                                and client_fdict[matching_file] == torrent_fdict[fname]
+                            ):
+                                size_match_found = True
+                                self.logger.success(
+                                    f"Size match found! File: {matching_file}, Size: {client_fdict[matching_file]}"
+                                )
+                                break
+
+                        if size_match_found:
+                            # Further verification: check if all files can match
+                            if not filecompare.check_conflicts(client_fdict, torrent_fdict):
+                                self.logger.success(f"Complete torrent match found: {torrent.name}")
+                                matched_torrents.append(torrent)
+                            else:
+                                self.logger.debug(f"Partial match found but verification failed: {torrent.name}")
+
+                # If matching torrent found, can return early
+                if matched_torrents:
+                    break
+
+                # If music file and no match found, stop searching
+                if filecompare.is_music_file(fname):
+                    self.logger.debug("Stopping search as music file match is not found")
+                    break
+
+            return matched_torrents
+
+        except Exception as e:
+            self.logger.error(f"Error searching torrent by filename in client: {e}")
+            return []
 
     def match_by_file_content(
         self,
@@ -298,13 +338,7 @@ class NemorosaCore:
                     self.logger.debug(f"File size match found for key: {matching_key}")
 
                     # If it's a music file, match directly
-                    if posixpath.splitext(matching_key)[1] in [
-                        ".flac",
-                        ".mp3",
-                        ".dsf",
-                        ".dff",
-                        ".m4a",
-                    ]:
+                    if filecompare.is_music_file(matching_key):
                         tid = t["torrentId"]
                         matched = True
                         self.logger.success(f"Music file match found! Torrent ID: {tid} (File: {matching_key})")
@@ -333,27 +367,19 @@ class NemorosaCore:
     def process_torrent_search(
         self,
         *,
-        fdict: dict,
-        tsize: int,
-        scan_source: str,
-        local_torrent_name: str,
+        torrent_details: ClientTorrentInfo,
         api: api.GazelleJSONAPI | api.GazelleParser,
-        download_dir: str,
         torrent_object: torf.Torrent | None = None,
     ):
         """Process torrent search and injection.
 
         Args:
-            fdict (dict): File dictionary mapping filename to size.
-            tsize (int): Total size of the torrent.
-            scan_source (str): Source hash for scanning.
-            local_torrent_name (str): Local torrent name.
+            torrent_details (ClientTorrentInfo): Torrent details from client.
             api: API instance for the target site.
-            download_dir (str): Download directory.
             torrent_object (torf.Torrent, optional): Original torrent object for hash search.
 
         Returns:
-            tuple: (torrent_id, downloaded) - torrent ID and download success status.
+            tuple[int, bool]: (torrent_id, downloaded) - torrent ID and download success status.
         """
         self.stats["scanned"] += 1
 
@@ -366,7 +392,7 @@ class NemorosaCore:
 
         # If hash search didn't find anything, try filename search
         if tid == -1:
-            tid = self.filename_search(fdict=fdict, tsize=tsize, api=api)
+            tid = self.filename_search(fdict=torrent_details.fdict, tsize=torrent_details.total_size, api=api)
             use_existing_torrent = False
 
         # Handle no match found case
@@ -376,7 +402,7 @@ class NemorosaCore:
             site_host = urlparse(api.server).netloc
 
             # Record scan result: no matching torrent found
-            self.database.add_scan_result(scan_source, local_torrent_name, None, site_host)
+            self.database.add_scan_result(torrent_details.hash, torrent_details.name, None, site_host)
             return tid, False
 
         # Found a match
@@ -398,12 +424,14 @@ class NemorosaCore:
         for f in torrent_object.files:
             fdict_torrent["/".join(f.parts[1:])] = f.size
 
-        rename_map = filecompare.generate_rename_map(fdict, fdict_torrent)
+        rename_map = filecompare.generate_rename_map(torrent_details.fdict, fdict_torrent)
 
         # Inject torrent and handle renaming
         downloaded = False
         if not config.cfg.global_config.no_download:
-            if self.torrent_client.inject_torrent(torrent_data, download_dir, local_torrent_name, rename_map):
+            if self.torrent_client.inject_torrent(
+                torrent_data, torrent_details.download_dir, torrent_details.name, rename_map
+            ):
                 downloaded = True
                 self.stats["downloaded"] += 1
                 self.logger.success("Torrent injected successfully")
@@ -425,11 +453,11 @@ class NemorosaCore:
         site_host = urlparse(api.server).netloc
 
         # Record scan result: matching torrent found
-        self.database.add_scan_result(scan_source, local_torrent_name, str(tid), site_host)
+        self.database.add_scan_result(torrent_details.hash, torrent_details.name, str(tid), site_host)
         if not downloaded:
             torrent_info = {
-                "download_dir": download_dir,
-                "local_torrent_name": local_torrent_name,
+                "download_dir": torrent_details.download_dir,
+                "local_torrent_name": torrent_details.name,
                 "rename_map": rename_map,
             }
             self.database.add_undownloaded_torrent(str(tid), torrent_info, site_host)
@@ -438,14 +466,12 @@ class NemorosaCore:
 
     def process_single_torrent_from_client(
         self,
-        torrent_name: str,
         torrent_details: ClientTorrentInfo,
     ) -> bool:
         """Process a single torrent from client torrent list.
 
         Args:
-            torrent_name (str): Name of the torrent.
-            torrent_details (dict): Torrent details from client.
+            torrent_details (ClientTorrentInfo): Torrent details from client.
 
         Returns:
             bool: True if any target site was successful, False otherwise.
@@ -455,20 +481,13 @@ class NemorosaCore:
         if self.database.is_hash_scanned(torrent_details.hash):
             self.logger.debug(
                 "Skipping already scanned torrent: %s (%s)",
-                torrent_name,
+                torrent_details.name,
                 torrent_details.hash,
             )
             return False
 
-        # Prepare file list and size
-        tsize = torrent_details.total_size
-        fdict = {posixpath.relpath(f.name, torrent_name): f.size for f in torrent_details.files}
-
         # Try to get torrent data from torrent client for hash search
-        torrent_object = None
-        # Get torrent hash from torrent details
-        torrent_hash = torrent_details.hash
-        torrent_object = self.torrent_client.get_torrent_object(torrent_hash)
+        torrent_object = self.torrent_client.get_torrent_object(torrent_details.hash)
 
         # Scan and match for each target site
         any_success = False
@@ -485,12 +504,8 @@ class NemorosaCore:
             try:
                 # Scan and match
                 tid, _ = self.process_torrent_search(
-                    fdict=fdict,
-                    tsize=tsize,
-                    scan_source=torrent_details.hash,
-                    local_torrent_name=torrent_name,
+                    torrent_details=torrent_details,
                     api=api_instance,
-                    download_dir=torrent_details.download_dir,
                     torrent_object=torrent_object,  # Pass torrent object for hash search
                 )
 
@@ -530,7 +545,6 @@ class NemorosaCore:
 
                 # Process single torrent
                 any_success = self.process_single_torrent_from_client(
-                    torrent_name=torrent_name,
                     torrent_details=torrent_details,
                 )
 
@@ -678,7 +692,6 @@ class NemorosaCore:
 
             # Process the torrent using the same logic as process_single_torrent_from_client
             any_success = self.process_single_torrent_from_client(
-                torrent_name=torrent_info.name,
                 torrent_details=torrent_info,
             )
 
@@ -702,6 +715,101 @@ class NemorosaCore:
         torrent_link: str,
         torrent_data: bytes,
     ) -> dict[str, Any]:
-        """Process a single announce torrent for cross-seeding."""
-        # TODO: Implement this
-        pass
+        """Process a single announce torrent for cross-seeding.
+
+        Args:
+            torrent_name (str): Name of the torrent.
+            torrent_link (str): Torrent link containing the torrent ID.
+            torrent_data (bytes): Torrent file data.
+
+        Returns:
+            dict[str, Any]: Processing result with status and details.
+        """
+        try:
+            # Extract torrent ID from torrent_link
+            parsed_link = urlparse(torrent_link)
+            query_params = parse_qs(parsed_link.query)
+            tid = query_params["id"][0]
+
+            self.logger.debug(f"Extracted torrent ID: {tid} from link: {torrent_link}")
+
+            # Get all torrent information from torrent_client (not filtered)
+            all_torrents = self.torrent_client.get_torrents()
+
+            # Parse incoming torrent data
+            torrent_object = torf.Torrent.read_stream(torrent_data)
+            fdict_torrent = {}
+            for f in torrent_object.files:
+                fdict_torrent["/".join(f.parts[1:])] = f.size
+
+            # Search for matching torrents in existing client
+            matched_torrents = self._search_torrent_by_filename_in_client(fdict_torrent, all_torrents)
+
+            if not matched_torrents:
+                return {
+                    "status": "not_found",
+                    "message": f"No matching torrent found in client for: {torrent_name}",
+                    "torrent_name": torrent_name,
+                    "torrent_id": tid,
+                }
+
+            # Check if incoming torrent may trump local torrent
+            for matched_torrent in matched_torrents:
+                for api_instance in self.target_apis:
+                    # Check if local matched torrent contains tracker consistent with incoming torrent
+                    if (
+                        api_instance.tracker_query in urlparse(matched_torrent.trackers[0]).hostname
+                        and api_instance.tracker_query in urlparse(torrent_object.trackers.flat[0]).hostname
+                    ):
+                        self.logger.info(
+                            f"Incoming torrent {tid} may trump local torrent {matched_torrent.hash}, "
+                            "skipping processing"
+                        )
+                        return {
+                            "status": "skipped_potential_trump",
+                            "message": f"Local torrent {matched_torrent.hash} may be trumped, skipping processing",
+                            "torrent_name": torrent_name,
+                            "torrent_id": tid,
+                            "matched_torrents": [t.hash for t in matched_torrents],
+                        }
+
+            # Use the first matching torrent
+            matched_torrent = matched_torrents[0]
+            self.logger.success(f"Found matching torrent in client: {matched_torrent.name}")
+
+            # Use client's file dictionary
+            rename_map = filecompare.generate_rename_map(matched_torrent.fdict, fdict_torrent)
+
+            # Inject torrent and handle renaming
+            downloaded = False
+            if not config.cfg.global_config.no_download:
+                if self.torrent_client.inject_torrent(
+                    torrent_data, matched_torrent.download_dir, matched_torrent.name, rename_map
+                ):
+                    downloaded = True
+                    self.stats["downloaded"] += 1
+                    self.logger.success("Torrent injected successfully")
+                else:
+                    self.logger.error(f"Failed to inject torrent: {tid}")
+
+            if not downloaded:
+                torrent_info = {
+                    "download_dir": matched_torrent.download_dir,
+                    "local_torrent_name": matched_torrent.name,
+                    "rename_map": rename_map,
+                }
+                self.database.add_undownloaded_torrent(str(tid), torrent_info, parsed_link.netloc)
+
+            return {
+                "status": "success",
+                "message": f"Successfully processed reverse announce torrent: {torrent_name}",
+                "torrent_name": torrent_name,
+                "torrent_id": tid,
+                "matched_torrent": matched_torrent.hash,
+                "downloaded": downloaded,
+                "rename_map": rename_map,
+            }
+
+        except Exception as e:
+            self.logger.error(f"Error processing reverse announce torrent {torrent_name}: {str(e)}")
+            return {"status": "error", "message": f"Error processing torrent: {str(e)}", "torrent_name": torrent_name}

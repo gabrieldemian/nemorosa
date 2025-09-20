@@ -10,7 +10,6 @@ import os
 import posixpath
 import time
 from abc import ABC, abstractmethod
-from typing import Any
 from urllib.parse import parse_qsl, urlparse
 
 import deluge_client
@@ -19,7 +18,7 @@ import qbittorrentapi
 import torf
 import transmission_rpc
 
-from . import config, logger
+from . import config, filecompare, logger
 
 
 class ClientTorrentFile(msgspec.Struct):
@@ -41,6 +40,15 @@ class ClientTorrentInfo(msgspec.Struct):
     trackers: list[str]
     download_dir: str
     existing_target_trackers: list[str] = msgspec.field(default_factory=list)
+
+    @property
+    def fdict(self) -> dict[str, int]:
+        """Generate file dictionary mapping relative file path to file size.
+
+        Returns:
+            dict[str, int]: Dictionary mapping relative file path to file size.
+        """
+        return {posixpath.relpath(f.name, self.name): f.size for f in self.files}
 
 
 class TorrentClient(ABC):
@@ -70,7 +78,7 @@ class TorrentClient(ABC):
             target_trackers (list[str]): List of target tracker names.
 
         Returns:
-            dict[str, Any] | None: Torrent information with existing_trackers, or None if not found.
+            ClientTorrentInfo | None: Torrent information with existing_trackers, or None if not found.
         """
         try:
             # Get all torrents
@@ -101,10 +109,7 @@ class TorrentClient(ABC):
 
             # Check if torrent contains music files (if check_music_only is enabled)
             if config.cfg.global_config.check_music_only:
-                music_extensions = [".flac", ".mp3", ".dsf", ".dff", ".m4a"]
-                has_music = any(
-                    posixpath.splitext(file.name)[1].lower() in music_extensions for file in target_torrent.files
-                )
+                has_music = any(filecompare.is_music_file(file.name) for file in target_torrent.files)
                 if not has_music:
                     return None
 
@@ -179,10 +184,7 @@ class TorrentClient(ABC):
 
                 # Check if torrent contains music files (if check_music_only is enabled)
                 if config.cfg.global_config.check_music_only:
-                    music_extensions = [".flac", ".mp3", ".dsf", ".dff", ".m4a"]
-                    has_music = any(
-                        posixpath.splitext(file.name)[1].lower() in music_extensions for file in torrent.files
-                    )
+                    has_music = any(filecompare.is_music_file(file.name) for file in torrent.files)
                     if not has_music:
                         continue
 
@@ -324,7 +326,7 @@ class TorrentClient(ABC):
     # ===== The following methods need to be implemented by derived classes =====
 
     @abstractmethod
-    def _add_torrent(self, torrent_data, download_dir: str) -> Any:
+    def _add_torrent(self, torrent_data, download_dir: str) -> str | int:
         """Add torrent to client, return torrent ID.
 
         Args:
@@ -332,25 +334,25 @@ class TorrentClient(ABC):
             download_dir (str): Download directory.
 
         Returns:
-            Any: Torrent ID.
+            str | int: Torrent ID.
         """
         pass
 
     @abstractmethod
-    def _remove_torrent(self, torrent_id: Any):
+    def _remove_torrent(self, torrent_id: str | int):
         """Remove torrent from client.
 
         Args:
-            torrent_id (Any): Torrent ID.
+            torrent_id (str | int): Torrent ID.
         """
         pass
 
     @abstractmethod
-    def _get_torrent_name(self, torrent_id: Any) -> str:
+    def _get_torrent_name(self, torrent_id: str | int) -> str:
         """Get torrent name.
 
         Args:
-            torrent_id (Any): Torrent ID.
+            torrent_id (str | int): Torrent ID.
 
         Returns:
             str: Torrent name.
@@ -358,42 +360,42 @@ class TorrentClient(ABC):
         pass
 
     @abstractmethod
-    def _rename_torrent(self, torrent_id: Any, old_name: str, new_name: str):
+    def _rename_torrent(self, torrent_id: str | int, old_name: str, new_name: str):
         """Rename entire torrent.
 
         Args:
-            torrent_id (Any): Torrent ID.
+            torrent_id (str | int): Torrent ID.
             old_name (str): Old torrent name.
             new_name (str): New torrent name.
         """
         pass
 
     @abstractmethod
-    def _rename_file(self, torrent_id: Any, old_path: str, new_name: str):
+    def _rename_file(self, torrent_id: str | int, old_path: str, new_name: str):
         """Rename file within torrent.
 
         Args:
-            torrent_id (Any): Torrent ID.
+            torrent_id (str | int): Torrent ID.
             old_path (str): Old file path.
             new_name (str): New file name.
         """
         pass
 
     @abstractmethod
-    def _verify_torrent(self, torrent_id: Any):
+    def _verify_torrent(self, torrent_id: str | int):
         """Verify torrent integrity.
 
         Args:
-            torrent_id (Any): Torrent ID.
+            torrent_id (str | int): Torrent ID.
         """
         pass
 
     @abstractmethod
-    def _has_target_tracker(self, torrent_id: Any, target_tracker: str) -> bool:
+    def _has_target_tracker(self, torrent_id: str | int, target_tracker: str) -> bool:
         """Check if torrent contains target tracker.
 
         Args:
-            torrent_id (Any): Torrent ID.
+            torrent_id (str | int): Torrent ID.
             target_tracker (str): Target tracker URL.
 
         Returns:
@@ -402,11 +404,11 @@ class TorrentClient(ABC):
         pass
 
     @abstractmethod
-    def _process_rename_map(self, torrent_id: Any, base_path: str, rename_map: dict) -> dict:
+    def _process_rename_map(self, torrent_id: str | int, base_path: str, rename_map: dict) -> dict:
         """Process rename mapping to adapt to specific torrent client.
 
         Args:
-            torrent_id (str): Torrent ID.
+            torrent_id (str | int): Torrent ID.
             base_path (str): Base path for files.
             rename_map (dict): Original rename mapping.
 
@@ -433,6 +435,63 @@ class TorrentClient(ABC):
             if self.logger:
                 self.logger.error(f"Error getting torrent object for hash {torrent_hash}: {e}")
             return None
+
+    def reverse_inject_torrent(
+        self, matched_torrents: list[ClientTorrentInfo], new_name: str, reverse_rename_map: dict
+    ) -> dict[str, bool]:
+        """Reverse inject logic: rename all local torrents to match incoming torrent format.
+
+        Args:
+            matched_torrents (list[ClientTorrentInfo]): List of local torrents to rename.
+            new_name (str): New torrent name to match incoming torrent.
+            reverse_rename_map (dict): File rename mapping from local to incoming format.
+
+        Returns:
+            dict[str, bool]: Dictionary mapping torrent ID to success status.
+        """
+        results = {}
+
+        for matched_torrent in matched_torrents:
+            torrent_id = matched_torrent.id
+            try:
+                # Get current torrent name
+                current_name = self._get_torrent_name(torrent_id)
+
+                # Rename entire torrent
+                if current_name != new_name:
+                    self._rename_torrent(torrent_id, current_name, new_name)
+                    if self.logger:
+                        self.logger.debug(f"Renamed torrent {torrent_id} from {current_name} to {new_name}")
+
+                # Rename files according to reverse rename map
+                if reverse_rename_map:
+                    for local_file_name, incoming_file_name in reverse_rename_map.items():
+                        self._rename_file(
+                            torrent_id,
+                            local_file_name,
+                            incoming_file_name,
+                        )
+                        if self.logger:
+                            self.logger.debug(
+                                f"Renamed file {local_file_name} to {incoming_file_name} in torrent {torrent_id}"
+                            )
+
+                # Verify torrent after renaming
+                if current_name != new_name or reverse_rename_map:
+                    if self.logger:
+                        self.logger.debug(f"Verifying torrent {torrent_id} after reverse renaming")
+                    self._verify_torrent(torrent_id)
+
+                results[str(torrent_id)] = True
+                if self.logger:
+                    self.logger.success(f"Reverse injection completed successfully for torrent {torrent_id}")
+
+            except Exception as e:
+                results[str(torrent_id)] = False
+                if self.logger:
+                    self.logger.error(f"Failed to reverse inject torrent {torrent_id}: {e}")
+
+        return results
 
     @abstractmethod
     def _get_torrent_data_by_hash(self, torrent_hash: str) -> bytes | None:
@@ -591,7 +650,12 @@ class QBittorrentClient(TorrentClient):
                 files = self.client.torrents_files(torrent_hash=torrent.hash)
                 # Get torrent trackers
                 trackers = self.client.torrents_trackers(torrent_hash=torrent.hash)
-                tracker_urls = [tracker.url for tracker in trackers]
+                # Remove special virtual trackers from tracker_urls
+                tracker_urls = [
+                    tracker.url
+                    for tracker in trackers
+                    if tracker.url not in ("** [DHT] **", "** [PeX] **", "** [LSD] **")
+                ]
 
                 result.append(
                     ClientTorrentInfo(

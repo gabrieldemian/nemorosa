@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import humanfriendly
 import msgspec
 import yaml
 from platformdirs import user_config_dir
@@ -67,13 +68,40 @@ class ServerConfig(msgspec.Struct):
     host: str | None = None
     port: int = 8256
     api_key: str | None = None
-    search_cadence: str | None = None  # e.g., "1 day", "6 hours"
-    cleanup_cadence: str = "1 day"  # Default cleanup cadence
+    search_cadence: str | None = None  # Will be parsed to seconds via property
+    cleanup_cadence: str = "1 day"  # Will be parsed to seconds via property
 
     def __post_init__(self):
         # Validate port range
         if not isinstance(self.port, int) or not (1 <= self.port <= 65535):
             raise ValueError(f"Server port must be an integer between 1 and 65535, got: {self.port}")
+
+        # Validate search_cadence
+        if self.search_cadence is not None:
+            try:
+                search_seconds = humanfriendly.parse_timespan(self.search_cadence)
+                if search_seconds <= 0:
+                    raise ValueError(f"search_cadence must be greater than 0, got: {search_seconds} seconds")
+            except Exception as e:
+                raise ValueError(f"Invalid search_cadence '{self.search_cadence}': {e}") from e
+
+        # Validate cleanup_cadence
+        try:
+            cleanup_seconds = humanfriendly.parse_timespan(self.cleanup_cadence)
+            if cleanup_seconds <= 0:
+                raise ValueError(f"cleanup_cadence must be greater than 0, got: {cleanup_seconds} seconds")
+        except Exception as e:
+            raise ValueError(f"Invalid cleanup_cadence '{self.cleanup_cadence}': {e}") from e
+
+    @property
+    def search_cadence_seconds(self) -> int | None:
+        """Get search cadence in seconds."""
+        return int(humanfriendly.parse_timespan(self.search_cadence))
+
+    @property
+    def cleanup_cadence_seconds(self) -> int | None:
+        """Get cleanup cadence in seconds."""
+        return int(humanfriendly.parse_timespan(self.cleanup_cadence))
 
 
 class TargetSiteConfig(msgspec.Struct):

@@ -1,8 +1,57 @@
 import difflib
+import posixpath
 import re
 from collections import defaultdict
 
 from . import logger
+
+
+def is_music_file(filename: str) -> bool:
+    """Check if a file is a music file based on its extension.
+
+    Args:
+        filename (str): The filename to check.
+
+    Returns:
+        bool: True if the file is a music file, False otherwise.
+    """
+    return posixpath.splitext(filename)[1].lower() in [".flac", ".mp3", ".dsf", ".dff", ".m4a"]
+
+
+def make_filename_query(filename: str) -> str:
+    """Generate cleaned search query string from filename.
+
+    Features:
+    1. Remove path part, keep only filename
+    2. Replace garbled characters with equal-length spaces
+    3. Merge consecutive spaces into single space
+
+    Args:
+        filename (str): Original filename.
+
+    Returns:
+        str: Cleaned filename.
+    """
+
+    # Remove path part, keep only filename
+    base_filename = posixpath.basename(filename)
+
+    # Replace common garbled characters and special symbols with equal-length spaces
+    # Including: question marks, Chinese question marks, consecutive underscores, brackets, etc.
+    sanitized_name = base_filename
+
+    # Replace common garbled characters and invisible characters with equal-length spaces
+    # Including zero-width spaces, control characters, and other invisible Unicode characters
+    sanitized_name = re.sub(
+        r'[?？�_\-\.·~`!@#$%^&*+=|\\:";\'<>?,/\u200b\u200c\u200d\u2060\ufeff\u00a0\u180e\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\u0000-\u001f\u007f-\u009f]',
+        " ",
+        sanitized_name,
+    )
+
+    # Finally merge consecutive multiple spaces into single space
+    sanitized_name = re.sub(r"\s+", " ", sanitized_name).strip()
+
+    return sanitized_name
 
 
 class DiffResult:
