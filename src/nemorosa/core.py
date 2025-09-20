@@ -40,7 +40,7 @@ class NemorosaCore:
         *,
         torrent_object: torf.Torrent,
         api: api.GazelleJSONAPI | api.GazelleParser,
-    ) -> int:
+    ) -> int | None:
         """Search for torrent using hash-based search.
 
         Args:
@@ -48,7 +48,7 @@ class NemorosaCore:
             api: API instance for the target site.
 
         Returns:
-            int: Torrent ID if found, -1 otherwise.
+            int | None: Torrent ID if found, None otherwise.
         """
         self.logger.debug("Trying hash-based search first")
         try:
@@ -90,7 +90,7 @@ class NemorosaCore:
         except Exception as e:
             self.logger.debug(f"Hash search failed: {e}")
 
-        return -1
+        return None
 
     def filename_search(
         self,
@@ -98,7 +98,7 @@ class NemorosaCore:
         fdict: dict,
         tsize: int,
         api: api.GazelleJSONAPI | api.GazelleParser,
-    ) -> int:
+    ) -> int | None:
         """Search for torrent using filename-based search.
 
         Args:
@@ -107,11 +107,11 @@ class NemorosaCore:
             api: API instance for the target site.
 
         Returns:
-            int: Torrent ID if found, -1 otherwise.
+            int | None: Torrent ID if found, None otherwise.
         """
         self.logger.debug("Hash search failed or not available, falling back to filename search")
         # search for the files with top 5 longest name
-        tid = -1
+        tid = None
         scan_querys = []
         max_fnames = sorted(fdict.keys(), key=lambda fname: len(fname), reverse=True)
         for index, fname in enumerate(max_fnames):
@@ -169,7 +169,7 @@ class NemorosaCore:
                 continue
 
             # Match by file content
-            if tid == -1:
+            if tid is None:
                 tid = self.match_by_file_content(
                     torrents=torrents,
                     fname_query=fname_query,
@@ -180,7 +180,7 @@ class NemorosaCore:
                 )
 
             # If match found, exit early
-            if tid != -1:
+            if tid is not None:
                 self.logger.debug(f"Match found with file '{fname}'. Stopping search.")
                 break
 
@@ -290,7 +290,7 @@ class NemorosaCore:
         fdict: dict,
         scan_querys: list[str],
         api: api.GazelleJSONAPI | api.GazelleParser,
-    ) -> int:
+    ) -> int | None:
         """Match torrents by file content.
 
         Args:
@@ -302,9 +302,9 @@ class NemorosaCore:
             api: API instance for the target site.
 
         Returns:
-            int: Torrent ID if found, -1 otherwise.
+            int | None: Torrent ID if found, None otherwise.
         """
-        tid = -1
+        tid = None
         self.logger.debug(f"No size match found. Checking file contents for '{fname_query}'")
         for t_index, t in enumerate(torrents, 1):
             self.logger.debug(f"Checking torrent #{t_index}/{len(torrents)}: ID {t['torrentId']}")
@@ -356,7 +356,7 @@ class NemorosaCore:
                 # Check file conflicts
                 if filecompare.check_conflicts(fdict, resp_files):
                     self.logger.debug("Conflict detected. Skipping this torrent.")
-                    tid = -1  # Reset tid
+                    tid = None  # Reset tid
                     matched = False
 
                 if matched:
@@ -379,11 +379,11 @@ class NemorosaCore:
             torrent_object (torf.Torrent, optional): Original torrent object for hash search.
 
         Returns:
-            tuple[int, bool]: (torrent_id, downloaded) - torrent ID and download success status.
+            tuple[int | None, bool]: (torrent_id, downloaded) - torrent ID and download success status.
         """
         self.stats["scanned"] += 1
 
-        tid = -1
+        tid = None
         use_existing_torrent = True
 
         # Try hash-based search first if torrent object is available
@@ -391,18 +391,24 @@ class NemorosaCore:
             tid = self.hash_based_search(torrent_object=torrent_object, api=api)
 
         # If hash search didn't find anything, try filename search
-        if tid == -1:
+        if tid is None:
             tid = self.filename_search(fdict=torrent_details.fdict, tsize=torrent_details.total_size, api=api)
             use_existing_torrent = False
 
         # Handle no match found case
-        if tid == -1:
+        if tid is None:
             self.logger.header("No matching torrent found")
             # Get site hostname
             site_host = urlparse(api.server).netloc
 
             # Record scan result: no matching torrent found
-            self.database.add_scan_result(torrent_details.hash, torrent_details.name, None, site_host)
+            self.database.add_scan_result(
+                local_torrent_hash=torrent_details.hash,
+                local_torrent_name=torrent_details.name,
+                matched_torrent_id=None,
+                site_host=site_host,
+                matched_torrent_hash=None,
+            )
             return tid, False
 
         # Found a match
@@ -453,7 +459,13 @@ class NemorosaCore:
         site_host = urlparse(api.server).netloc
 
         # Record scan result: matching torrent found
-        self.database.add_scan_result(torrent_details.hash, torrent_details.name, str(tid), site_host)
+        self.database.add_scan_result(
+            local_torrent_hash=torrent_details.hash,
+            local_torrent_name=torrent_details.name,
+            matched_torrent_id=str(tid),
+            site_host=site_host,
+            matched_torrent_hash=torrent_object.infohash,
+        )
         if not downloaded:
             torrent_info = {
                 "download_dir": torrent_details.download_dir,
@@ -478,7 +490,7 @@ class NemorosaCore:
         """
 
         # Check if torrent has been scanned
-        if self.database.is_hash_scanned(torrent_details.hash):
+        if self.database.is_hash_scanned(local_torrent_hash=torrent_details.hash):
             self.logger.debug(
                 "Skipping already scanned torrent: %s (%s)",
                 torrent_details.name,
@@ -509,7 +521,7 @@ class NemorosaCore:
                     torrent_object=torrent_object,  # Pass torrent object for hash search
                 )
 
-                if tid != -1:
+                if tid is not None:
                     any_success = True
                     self.logger.success(f"Successfully processed on {api_instance.server}")
 
@@ -666,7 +678,7 @@ class NemorosaCore:
                 }
 
             # Check if torrent has been scanned
-            if self.database.is_hash_scanned(infohash):
+            if self.database.is_hash_scanned(local_torrent_hash=infohash):
                 return {
                     "status": "skipped",
                     "message": f"Torrent {infohash} already scanned",

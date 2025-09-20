@@ -68,12 +68,13 @@ class TorrentDatabase:
             # Scan results table - merge original scan_history, torrent_mapping, torrent_results
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS scan_results (
-                    file_hash TEXT NOT NULL,
-                    torrent_name TEXT,
+                    local_torrent_hash TEXT NOT NULL,
+                    local_torrent_name TEXT,
                     site_host TEXT DEFAULT 'default',
-                    torrent_id TEXT,
+                    matched_torrent_id TEXT,
+                    matched_torrent_hash TEXT,
                     scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (file_hash, site_host)
+                    PRIMARY KEY (local_torrent_hash, site_host)
                 )
             """)
 
@@ -102,35 +103,43 @@ class TorrentDatabase:
             """)
 
             # Create indexes to improve query performance
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_scan_results_time ON scan_results(scanned_at)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_scan_results_torrent_id ON scan_results(torrent_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_undownloaded_time ON undownloaded_torrents(added_at)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_scan_results_local_torrent_hash ON scan_results(local_torrent_hash)"
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_undownloaded_site_host ON undownloaded_torrents(site_host)")
 
     # ================== Scan results related methods ==================
 
     def add_scan_result(
-        self, file_hash: str, torrent_name: str = None, torrent_id: str = None, site_host: str = "default"
+        self,
+        local_torrent_hash: str,
+        local_torrent_name: str = None,
+        matched_torrent_id: str = None,
+        site_host: str = "default",
+        matched_torrent_hash: str = None,
     ):
         """Add scan result record.
 
         Args:
-            file_hash (str): File hash.
-            torrent_name (str, optional): Torrent name.
-            torrent_id (str, optional): Torrent ID (can be None to indicate not found).
+            local_torrent_hash (str): Local torrent hash.
+            local_torrent_name (str, optional): Local torrent name.
+            matched_torrent_id (str, optional): Matched torrent ID (can be None to indicate not found).
             site_host (str): Site hostname.
+            matched_torrent_hash (str, optional): Matched torrent hash.
         """
         with self.transaction() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO scan_results "
-                "(file_hash, torrent_name, torrent_id, site_host) VALUES (?, ?, ?, ?)",
-                (file_hash, torrent_name, torrent_id, site_host),
+                "(local_torrent_hash, local_torrent_name, matched_torrent_id, site_host, "
+                "matched_torrent_hash) VALUES (?, ?, ?, ?, ?)",
+                (local_torrent_hash, local_torrent_name, matched_torrent_id, site_host, matched_torrent_hash),
             )
 
-    def is_hash_scanned(self, file_hash: str, site_host: str = None) -> bool:
-        """Check if specified file hash has been scanned.
+    def is_hash_scanned(self, local_torrent_hash: str, site_host: str = None) -> bool:
+        """Check if specified local torrent hash has been scanned.
 
         Args:
-            file_hash (str): File hash.
+            local_torrent_hash (str): Local torrent hash.
             site_host (str, optional): Site hostname, if None checks all sites.
 
         Returns:
@@ -139,12 +148,14 @@ class TorrentDatabase:
         with self.connection as conn:
             if site_host is None:
                 # Check all sites
-                cursor = conn.execute("SELECT 1 FROM scan_results WHERE file_hash = ? LIMIT 1", (file_hash,))
+                cursor = conn.execute(
+                    "SELECT 1 FROM scan_results WHERE local_torrent_hash = ? LIMIT 1", (local_torrent_hash,)
+                )
             else:
                 # Check specific site
                 cursor = conn.execute(
-                    "SELECT 1 FROM scan_results WHERE file_hash = ? AND site_host = ? LIMIT 1",
-                    (file_hash, site_host),
+                    "SELECT 1 FROM scan_results WHERE local_torrent_hash = ? AND site_host = ? LIMIT 1",
+                    (local_torrent_hash, site_host),
                 )
             return cursor.fetchone() is not None
 
