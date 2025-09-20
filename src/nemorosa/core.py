@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urlparse
 import torf
 
 from . import api, config, db, filecompare, logger
-from .torrent_client import ClientTorrentInfo, TorrentClient
+from .torrent_client import ClientTorrentInfo, TorrentClient, TorrentConflictError
 
 
 class NemorosaCore:
@@ -384,7 +384,10 @@ class NemorosaCore:
         self.stats["scanned"] += 1
 
         tid = None
-        use_existing_torrent = True
+        hash_match = True
+
+        # Get site hostname
+        site_host = urlparse(api.server).netloc
 
         # Try hash-based search first if torrent object is available
         if torrent_object:
@@ -393,13 +396,11 @@ class NemorosaCore:
         # If hash search didn't find anything, try filename search
         if tid is None:
             tid = self.filename_search(fdict=torrent_details.fdict, tsize=torrent_details.total_size, api=api)
-            use_existing_torrent = False
+            hash_match = False
 
         # Handle no match found case
         if tid is None:
             self.logger.header("No matching torrent found")
-            # Get site hostname
-            site_host = urlparse(api.server).netloc
 
             # Record scan result: no matching torrent found
             self.database.add_scan_result(
@@ -409,7 +410,7 @@ class NemorosaCore:
                 site_host=site_host,
                 matched_torrent_hash=None,
             )
-            return tid, False
+            return None, False
 
         # Found a match
         self.stats["found"] += 1
@@ -417,7 +418,7 @@ class NemorosaCore:
 
         # If found via hash search, modify the existing torrent for the new tracker
         # Otherwise, download the torrent data
-        if use_existing_torrent:
+        if hash_match:
             torrent_object.comment = api.get_torrent_url(tid)
             torrent_object.trackers = [api.announce]
             torrent_data = torrent_object.dump()
@@ -435,28 +436,38 @@ class NemorosaCore:
         # Inject torrent and handle renaming
         downloaded = False
         if not config.cfg.global_config.no_download:
-            if self.torrent_client.inject_torrent(
-                torrent_data, torrent_details.download_dir, torrent_details.name, rename_map
-            ):
-                downloaded = True
-                self.stats["downloaded"] += 1
-                self.logger.success("Torrent injected successfully")
-            else:
-                self.logger.error(f"Failed to inject torrent: {tid}")
-                self.stats["cnt_dl_fail"] += 1
-                if self.stats["cnt_dl_fail"] <= 10:
-                    self.logger.error(traceback.format_exc())
-                    self.logger.error(
-                        f"It might because the torrent id {tid} has reached the "
-                        f"limitation of non-browser downloading of {api.server}. "
-                        f"The failed download info will be saved to database. "
-                        "You can download it from your own browser."
-                    )
-                    if self.stats["cnt_dl_fail"] == 10:
-                        self.logger.debug("Suppressing further hinting for .torrent file downloading failures")
-
-        # Get site hostname
-        site_host = urlparse(api.server).netloc
+            try:
+                if self.torrent_client.inject_torrent(
+                    torrent_data, torrent_details.download_dir, torrent_details.name, rename_map, hash_match
+                ):
+                    downloaded = True
+                    self.stats["downloaded"] += 1
+                    self.logger.success("Torrent injected successfully")
+                else:
+                    self.logger.error(f"Failed to inject torrent: {tid}")
+                    self.stats["cnt_dl_fail"] += 1
+                    if self.stats["cnt_dl_fail"] <= 10:
+                        self.logger.error(traceback.format_exc())
+                        self.logger.error(
+                            f"It might because the torrent id {tid} has reached the "
+                            f"limitation of non-browser downloading of {api.server}. "
+                            f"The failed download info will be saved to database. "
+                            "You can download it from your own browser."
+                        )
+                        if self.stats["cnt_dl_fail"] == 10:
+                            self.logger.debug("Suppressing further hinting for .torrent file downloading failures")
+            except TorrentConflictError as e:
+                # Torrent conflict - treat as no match found
+                self.logger.debug(f"Torrent conflict detected: {e}")
+                # Record scan result: no matching torrent found
+                self.database.add_scan_result(
+                    local_torrent_hash=torrent_details.hash,
+                    local_torrent_name=torrent_details.name,
+                    matched_torrent_id=None,
+                    site_host=site_host,
+                    matched_torrent_hash=None,
+                )
+                return None, False
 
         # Record scan result: matching torrent found
         self.database.add_scan_result(
@@ -621,7 +632,7 @@ class NemorosaCore:
 
                         # Try to inject torrent into client
                         if self.torrent_client.inject_torrent(
-                            torrent_data, download_dir, local_torrent_name, rename_map
+                            torrent_data, download_dir, local_torrent_name, rename_map, False
                         ):
                             retry_stats["successful"] += 1
                             retry_stats["removed"] += 1
@@ -796,7 +807,7 @@ class NemorosaCore:
             downloaded = False
             if not config.cfg.global_config.no_download:
                 if self.torrent_client.inject_torrent(
-                    torrent_data, matched_torrent.download_dir, matched_torrent.name, rename_map
+                    torrent_data, matched_torrent.download_dir, matched_torrent.name, rename_map, False
                 ):
                     downloaded = True
                     self.stats["downloaded"] += 1

@@ -21,6 +21,12 @@ import transmission_rpc
 from . import config, filecompare, logger
 
 
+class TorrentConflictError(Exception):
+    """Exception raised when torrent cannot coexist with local torrent due to source flag issues."""
+
+    pass
+
+
 class ClientTorrentFile(msgspec.Struct):
     """Represents a file within a torrent from torrent client."""
 
@@ -245,7 +251,9 @@ class TorrentClient(ABC):
                 self.logger.error("Error retrieving torrents: %s", e)
             return {}
 
-    def inject_torrent(self, torrent_data, download_dir: str, local_torrent_name: str, rename_map: dict) -> bool:
+    def inject_torrent(
+        self, torrent_data, download_dir: str, local_torrent_name: str, rename_map: dict, hash_match: bool
+    ) -> bool:
         """Inject torrent into client (includes complete logic).
 
         Derived classes only need to implement specific client operation methods.
@@ -255,6 +263,7 @@ class TorrentClient(ABC):
             download_dir (str): Download directory.
             local_torrent_name (str): Local torrent name.
             rename_map (dict): File rename mapping.
+            hash_match (bool): Whether this is a hash match, if True, skip verification.
 
         Returns:
             bool: True if injection successful, False otherwise.
@@ -266,16 +275,20 @@ class TorrentClient(ABC):
         for attempt in range(max_retries):
             try:
                 # Add torrent to client
-                torrent_id = self._add_torrent(torrent_data, download_dir)
+                torrent_id = self._add_torrent(torrent_data, download_dir, hash_match)
 
                 # Check if tracker is correctly added
                 torrent_obj = torf.Torrent.read_stream(torrent_data)
                 target_tracker = torrent_obj.trackers.flat[0] if torrent_obj.trackers else ""
                 if not self._has_target_tracker(torrent_id, target_tracker):
+                    error_msg = (
+                        f"The torrent to be injected cannot coexist with local torrent {torrent_obj.infohash}. "
+                        "This usually happens because the source flag of the torrent to be injected is incorrect, "
+                        "which generally occurs on trackers that do not enforce source flag requirements."
+                    )
                     if self.logger:
-                        self.logger.debug(f"Torrent does not have target tracker: {target_tracker}")
-                    self._remove_torrent(torrent_id)
-                    torrent_id = self._add_torrent(torrent_data, download_dir)
+                        self.logger.error(error_msg)
+                    raise TorrentConflictError(error_msg)
 
                 # Get current torrent name
                 current_name = self._get_torrent_name(torrent_id)
@@ -304,15 +317,25 @@ class TorrentClient(ABC):
                         if self.logger:
                             self.logger.debug(f"Renamed torrent file {torrent_file_name} to {local_file_name}")
 
-                # Verify torrent (if renaming was performed)
-                if current_name != local_torrent_name or rename_map:
+                # Verify torrent (if renaming was performed or not hash match for non-Transmission clients)
+                should_verify = (
+                    current_name != local_torrent_name
+                    or rename_map
+                    or (not hash_match and not isinstance(self, TransmissionClient))
+                )
+                if should_verify:
                     if self.logger:
                         self.logger.debug("Verifying torrent after renaming")
+                    time.sleep(1)
                     self._verify_torrent(torrent_id)
 
                 if self.logger:
                     self.logger.success("Torrent injected successfully")
                 return True
+            except TorrentConflictError as e:
+                if self.logger:
+                    self.logger.error(f"Torrent injection failed due to conflict: {e}")
+                raise
             except Exception as e:
                 if attempt < max_retries - 1:
                     if self.logger:
@@ -326,12 +349,13 @@ class TorrentClient(ABC):
     # ===== The following methods need to be implemented by derived classes =====
 
     @abstractmethod
-    def _add_torrent(self, torrent_data, download_dir: str) -> str | int:
+    def _add_torrent(self, torrent_data, download_dir: str, hash_match: bool) -> str | int:
         """Add torrent to client, return torrent ID.
 
         Args:
             torrent_data: Torrent file data.
             download_dir (str): Download directory.
+            hash_match (bool): Whether this is a hash match, if True, skip verification.
 
         Returns:
             str | int: Torrent ID.
@@ -551,12 +575,13 @@ class TransmissionClient(TorrentClient):
                 self.logger.error("Error retrieving torrents from Transmission: %s", e)
             return []
 
-    def _add_torrent(self, torrent_data, download_dir: str) -> int:
+    def _add_torrent(self, torrent_data, download_dir: str, hash_match: bool) -> int:
         """Add torrent to Transmission.
 
         Args:
             torrent_data: Torrent file data.
             download_dir (str): Download directory.
+            hash_match (bool): Not used for Transmission (has fast verification by default).
 
         Returns:
             int: Torrent ID.
@@ -677,10 +702,15 @@ class QBittorrentClient(TorrentClient):
                 self.logger.error("Error retrieving torrents from qBittorrent: %s", e)
             return []
 
-    def _add_torrent(self, torrent_data, download_dir: str) -> str:
+    def _add_torrent(self, torrent_data, download_dir: str, hash_match: bool) -> str:
         """Add torrent to qBittorrent."""
         self.client.torrents_add(
-            torrent_files=torrent_data, save_path=download_dir, is_paused=True, category=config.cfg.downloader.label
+            torrent_files=torrent_data,
+            save_path=download_dir,
+            is_paused=True,
+            category=config.cfg.downloader.label,
+            use_auto_torrent_management=False,
+            is_skip_checking=hash_match,  # Skip hash checking if hash match
         )
         # qBittorrent doesn't return the hash directly, we need to decode it
         torrent_obj = torf.Torrent.read_stream(torrent_data)
@@ -781,7 +811,7 @@ class DelugeClient(TorrentClient):
                 self.logger.error("Error retrieving torrents from Deluge: %s", e)
             return []
 
-    def _add_torrent(self, torrent_data, download_dir: str) -> str:
+    def _add_torrent(self, torrent_data, download_dir: str, hash_match: bool) -> str:
         """Add torrent to Deluge."""
         torrent_b64 = base64.b64encode(torrent_data).decode()
 
@@ -796,6 +826,7 @@ class DelugeClient(TorrentClient):
                 {
                     "download_location": download_dir,
                     "add_paused": True,
+                    "seed_mode": hash_match,  # Skip hash checking if hash match
                 },
             )
 
