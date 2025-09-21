@@ -420,11 +420,14 @@ class NemorosaCore:
         # If found via hash search, modify the existing torrent for the new tracker
         # Otherwise, download the torrent data
         if hash_match:
+            assert torrent_object is not None
             torrent_object.comment = api.get_torrent_url(tid)
             torrent_object.trackers = [api.announce]
             torrent_data = torrent_object.dump()
         else:
             torrent_data = api.download_torrent(tid)
+            if torrent_data is None:
+                raise ValueError("Failed to download torrent data")
             torrent_object = torf.Torrent.read_stream(torrent_data)
 
         # Generate file dictionary and rename map
@@ -900,9 +903,13 @@ class NemorosaCore:
             for matched_torrent in matched_torrents:
                 for api_instance in self.target_apis:
                     # Check if local matched torrent contains tracker consistent with incoming torrent
+                    local_hostname = urlparse(matched_torrent.trackers[0]).hostname
+                    incoming_hostname = urlparse(torrent_object.trackers.flat[0]).hostname
                     if (
-                        api_instance.tracker_query in urlparse(matched_torrent.trackers[0]).hostname
-                        and api_instance.tracker_query in urlparse(torrent_object.trackers.flat[0]).hostname
+                        local_hostname is not None 
+                        and incoming_hostname is not None
+                        and api_instance.tracker_query in local_hostname
+                        and api_instance.tracker_query in incoming_hostname
                     ):
                         self.logger.warning(
                             f"Incoming torrent {tid} may trump local torrent {matched_torrent.hash}, "

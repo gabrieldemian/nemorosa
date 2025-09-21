@@ -94,12 +94,14 @@ class ServerConfig(msgspec.Struct):
             raise ValueError(f"Invalid cleanup_cadence '{self.cleanup_cadence}': {e}") from e
 
     @property
-    def search_cadence_seconds(self) -> int | None:
+    def search_cadence_seconds(self) -> int:
         """Get search cadence in seconds."""
+        if self.search_cadence is None:
+            return 0
         return int(humanfriendly.parse_timespan(self.search_cadence))
 
     @property
-    def cleanup_cadence_seconds(self) -> int | None:
+    def cleanup_cadence_seconds(self) -> int:
         """Get cleanup cadence in seconds."""
         return int(humanfriendly.parse_timespan(self.cleanup_cadence))
 
@@ -177,11 +179,11 @@ def find_config_path(config_path: str | None = None) -> str:
     """
     if config_path:
         # Use specified configuration file path
-        config_path = Path(config_path)
-        if config_path.exists():
-            return str(config_path.absolute())
+        config_path_obj = Path(config_path)
+        if config_path_obj.exists():
+            return str(config_path_obj.absolute())
         else:
-            raise FileNotFoundError(f"Specified config file not found: {config_path}")
+            raise FileNotFoundError(f"Specified config file not found: {config_path_obj}")
 
     # Only use user configuration directory
     user_config_path = Path(get_user_config_path())
@@ -257,8 +259,8 @@ def create_default_config(target_path: str | None = None) -> str:
     if target_path is None:
         target_path = get_user_config_path()
 
-    target_path = Path(target_path)
-    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path_obj = Path(target_path)
+    target_path_obj.parent.mkdir(parents=True, exist_ok=True)
 
     # Default configuration content
     default_config = f"""# Nemorosa Configuration File
@@ -304,14 +306,14 @@ target_site:
     cookie: "your_cookie_here" # only cookie is supported for dicmusic.com
 """
 
-    with open(target_path, "w", encoding="utf-8") as f:
+    with open(target_path_obj, "w", encoding="utf-8") as f:
         f.write(default_config)
 
-    return str(target_path)
+    return str(target_path_obj)
 
 
 # Global configuration object
-cfg: NemorosaConfig | None = None
+cfg: NemorosaConfig
 
 
 def init_config(config_path: str | None = None) -> None:

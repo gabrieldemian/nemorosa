@@ -178,7 +178,7 @@ def setup_target_sites(app_logger):
             if site_config.cookie:
                 simple_cookie = http.cookies.SimpleCookie(site_config.cookie)
                 site_cookies = requests.cookies.RequestsCookieJar()
-                site_cookies.update(simple_cookie)
+                site_cookies.update(simple_cookie)  # pyright: ignore[reportArgumentType]
 
             target_sites.append(
                 {

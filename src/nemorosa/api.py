@@ -144,7 +144,7 @@ class GazelleBase:
                 if response.status_code != 200:
                     self.logger.error(f"Status of request is {response.status_code}. Aborting...")
                     self.logger.error(f"Response content: {response._content}")
-                    raise RequestException
+                    raise RequestException(f"HTTP {response.status_code}: {response._content}")
 
                 self.logger.debug(f"Torrent {torrent_id} downloaded successfully")
                 return response.content
@@ -477,7 +477,12 @@ class GazelleParser(GazelleBase):
             if not download_link:
                 return None
 
-            parsed_url = urlparse(download_link["href"])
+            # Ensure href is a string
+            href = download_link.get("href")
+            if not href or not isinstance(href, str):
+                return None
+
+            parsed_url = urlparse(href)
             query_params = parse_qs(parsed_url.query)
             torrent_id = query_params.get("id", [None])[0]
             if not torrent_id:
@@ -486,7 +491,7 @@ class GazelleParser(GazelleBase):
             self.authkey = query_params.get("authkey", [None])[0]
             self.passkey = query_params.get("torrent_pass", [None])[0]
 
-            full_download_url = urljoin(self.server, download_link["href"])
+            full_download_url = urljoin(self.server, href)
 
             # Get torrent size
             size_cell = row.select("td")[3]  # Column 4 is size

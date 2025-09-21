@@ -1,7 +1,6 @@
 """Web server module for nemorosa."""
 
 import base64
-import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -41,7 +40,7 @@ class AnnounceRequest(BaseModel):
 
 
 # Global variables
-app_logger: logging.Logger | None = None
+app_logger: logger.ColorLogger | None = None
 target_apis: list[api.GazelleJSONAPI | api.GazelleParser] | None = None
 job_manager: scheduler.JobManager | None = None
 
@@ -50,6 +49,10 @@ job_manager: scheduler.JobManager | None = None
 async def lifespan(app: FastAPI):
     """Lifespan event handler for FastAPI app."""
     global job_manager, app_logger, target_apis
+
+    # Initialize logger if not already done
+    if app_logger is None:
+        app_logger = logger.get_logger()
 
     # Startup
     if job_manager and target_apis:
@@ -371,7 +374,7 @@ def run_webserver(
     job_manager = scheduler.get_job_manager()
 
     # Set up logger
-    app_logger = logger.generate_logger(log_level)
+    app_logger = logger.get_logger()
 
     # Log server startup
     display_host = host if host is not None else "all interfaces (IPv4/IPv6)"
@@ -401,4 +404,4 @@ def run_webserver(
     import uvicorn
 
     # Run server
-    uvicorn.run("nemorosa.webserver:app", host=host, port=port, log_level=log_level, reload=False)
+    uvicorn.run("nemorosa.webserver:app", host=host, port=port, log_level=log_level, reload=False)  # pyright: ignore[reportArgumentType]

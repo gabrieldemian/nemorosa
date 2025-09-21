@@ -118,10 +118,10 @@ class TorrentDatabase:
     def add_scan_result(
         self,
         local_torrent_hash: str,
-        local_torrent_name: str = None,
-        matched_torrent_id: str = None,
+        local_torrent_name: str | None = None,
+        matched_torrent_id: str | None = None,
         site_host: str = "default",
-        matched_torrent_hash: str = None,
+        matched_torrent_hash: str | None = None,
     ):
         """Add scan result record.
 

@@ -389,7 +389,11 @@ class TorrentClient(ABC):
                     raise TorrentConflictError(error_msg)
 
                 # Get current torrent name
-                current_name = self.get_torrent_info(torrent_id).name
+                torrent_info = self.get_torrent_info(torrent_id)
+                if torrent_info is None:
+                    self.logger.error(f"Failed to get torrent info for {torrent_id}")
+                    return False
+                current_name = torrent_info.name
 
                 # Rename entire torrent
                 if current_name != local_torrent_name:
@@ -436,6 +440,9 @@ class TorrentClient(ABC):
                 else:
                     self.logger.error(f"Failed to inject torrent after {max_retries} attempts: {e}")
                     return False
+        
+        # This should never be reached, but just in case
+        return False
 
     # ===== The following methods need to be implemented by derived classes =====
 
@@ -569,7 +576,11 @@ class TorrentClient(ABC):
             torrent_id = matched_torrent.id
             try:
                 # Get current torrent name
-                current_name = self.get_torrent_info(torrent_id).name
+                torrent_info = self.get_torrent_info(torrent_id)
+                if torrent_info is None:
+                    self.logger.warning(f"Failed to get torrent info for {torrent_id}, skipping")
+                    continue
+                current_name = torrent_info.name
 
                 # Rename entire torrent
                 if current_name != new_name:
@@ -620,13 +631,14 @@ class TransmissionClient(TorrentClient):
 
     def __init__(self, url: str):
         super().__init__()
-        parsed = parse_libtc_url(url)
-        self.torrents_dir = parsed.get("torrents_dir", "/config/torrents")
+        config = parse_libtc_url(url)
+        self.torrents_dir = config.torrents_dir or "/config/torrents"
+        
         self.client = transmission_rpc.Client(
-            host=parsed.get("host", "localhost"),
-            port=parsed.get("port", 9091),
-            username=parsed.get("username"),
-            password=parsed.get("password"),
+            host=config.host or "localhost",
+            port=config.port or 9091,
+            username=config.username,
+            password=config.password,
         )
 
     def get_torrents(self) -> list[ClientTorrentInfo]:
@@ -657,8 +669,8 @@ class TransmissionClient(TorrentClient):
                         ],
                         trackers=torrent.tracker_list,
                         download_dir=torrent.download_dir,
-                        state=TRANSMISSION_STATE_MAPPING.get(torrent.status, TorrentState.UNKNOWN),
-                        piece_progress=torrent.pieces or [],
+                        state=TRANSMISSION_STATE_MAPPING.get(int(torrent.status), TorrentState.UNKNOWN),
+                        piece_progress=torrent.pieces if isinstance(torrent.pieces, list) else [],
                     )
                 )
 
@@ -712,8 +724,8 @@ class TransmissionClient(TorrentClient):
                 ],
                 trackers=torrent.tracker_list,
                 download_dir=torrent.download_dir,
-                state=TRANSMISSION_STATE_MAPPING.get(torrent.status, TorrentState.UNKNOWN),
-                piece_progress=torrent.pieces or [],
+                state=TRANSMISSION_STATE_MAPPING.get(int(torrent.status), TorrentState.UNKNOWN),
+                piece_progress=torrent.pieces if isinstance(torrent.pieces, list) else [],
             )
         except Exception as e:
             self.logger.error("Error retrieving torrent info from Transmission: %s", e)
@@ -779,11 +791,12 @@ class QBittorrentClient(TorrentClient):
 
     def __init__(self, url: str):
         super().__init__()
-        parsed = parse_libtc_url(url)
+        config = parse_libtc_url(url)
+        
         self.client = qbittorrentapi.Client(
-            host=parsed.get("url", "http://localhost:8080"),
-            username=parsed.get("username"),
-            password=parsed.get("password"),
+            host=config.url or "http://localhost:8080",
+            username=config.username,
+            password=config.password,
         )
         # Authenticate with qBittorrent
         self.client.auth_log_in()
@@ -927,13 +940,13 @@ class DelugeClient(TorrentClient):
 
     def __init__(self, url: str):
         super().__init__()
-        parsed = parse_libtc_url(url)
-        self.torrents_dir = parsed.get("torrents_dir", "")
+        config = parse_libtc_url(url)
+        self.torrents_dir = config.torrents_dir or ""
         self.client = deluge_client.DelugeRPCClient(
-            host=parsed.get("host", "localhost"),
-            port=parsed.get("port", 58846),
-            username=parsed.get("username", ""),
-            password=parsed.get("password", ""),
+            host=config.host or "localhost",
+            port=config.port or 58846,
+            username=config.username or "",
+            password=config.password or "",
             decode_utf8=True,
         )
         # Connect to Deluge daemon
@@ -942,10 +955,12 @@ class DelugeClient(TorrentClient):
     def get_torrents(self) -> list[ClientTorrentInfo]:
         """Get all torrents from Deluge."""
         try:
-            torrent_ids = self.client.call("core.get_torrents_status", {}, [])
+            torrent_details = self.client.call("core.get_torrents_status", {}, [])
+            if torrent_details is None:
+                return []
             result = []
 
-            for torrent_id, torrent_info in torrent_ids.items():
+            for torrent_id, torrent_info in torrent_details.items():
                 result.append(
                     ClientTorrentInfo(
                         id=torrent_id,
@@ -973,35 +988,30 @@ class DelugeClient(TorrentClient):
     def _add_torrent(self, torrent_data, download_dir: str, hash_match: bool) -> str:
         """Add torrent to Deluge."""
         torrent_b64 = base64.b64encode(torrent_data).decode()
+        torrent_id = self.client.call(
+            "core.add_torrent_file",
+            f"{os.urandom(16).hex()}.torrent",  # filename
+            torrent_b64,
+            {
+                "download_location": download_dir,
+                "add_paused": True,
+                "seed_mode": hash_match,  # Skip hash checking if hash match
+            },
+        )
 
-        try:
-            torrent_id = self.client.call(
-                "core.add_torrent_file",
-                f"{os.urandom(16).hex()}.torrent",  # filename
-                torrent_b64,
-                {
-                    "download_location": download_dir,
-                    "add_paused": True,
-                    "seed_mode": hash_match,  # Skip hash checking if hash match
-                },
-            )
-
-            # Set label (if provided)
-            label = config.cfg.downloader.label
-            if label and torrent_id:
-                try:
+        # Set label (if provided)
+        label = config.cfg.downloader.label
+        if label and torrent_id:
+            try:
+                self.client.call("label.set_torrent", torrent_id, label)
+            except Exception as label_error:
+                # If setting label fails, try creating label first
+                if "Unknown Label" in str(label_error) or "label does not exist" in str(label_error).lower():
+                    self.client.call("label.add", label)
+                    # Try setting label again
                     self.client.call("label.set_torrent", torrent_id, label)
-                except Exception as label_error:
-                    # If setting label fails, try creating label first
-                    if "Unknown Label" in str(label_error) or "label does not exist" in str(label_error).lower():
-                        self.client.call("label.add", label)
-                        # Try setting label again
-                        self.client.call("label.set_torrent", torrent_id, label)
 
-            return torrent_id
-        except Exception as e:
-            self.logger.error(f"Failed to add torrent: {e}")
-            return None
+        return str(torrent_id)
 
     def _remove_torrent(self, torrent_id: str):
         """Remove torrent from Deluge."""
@@ -1015,6 +1025,9 @@ class DelugeClient(TorrentClient):
                 torrent_id,
                 ["name", "hash", "progress", "total_size", "files", "trackers", "save_path", "pieces"],
             )
+
+            if torrent_info is None:
+                return None
 
             return ClientTorrentInfo(
                 id=torrent_id,
@@ -1053,6 +1066,8 @@ class DelugeClient(TorrentClient):
     def _has_target_tracker(self, torrent_id: str, target_tracker: str) -> bool:
         """Check if torrent contains target tracker."""
         torrent_info = self.client.call("core.get_torrent_status", torrent_id, ["trackers"])
+        if torrent_info is None:
+            return False
         tracker_urls = [tracker["url"] for tracker in torrent_info["trackers"]]
         return any(target_tracker in url for url in tracker_urls)
 
@@ -1071,6 +1086,8 @@ class DelugeClient(TorrentClient):
         """
         new_rename_map = {}
         torrent_info = self.client.call("core.get_torrent_status", torrent_id, ["files"])
+        if torrent_info is None:
+            return {}
         files = torrent_info.get("files", [])
         for file in files:
             relpath = posixpath.relpath(file["path"], base_path)
@@ -1081,7 +1098,7 @@ class DelugeClient(TorrentClient):
     def _get_torrent_data_by_hash(self, torrent_hash: str) -> bytes | None:
         """Get torrent data from Deluge by hash."""
         try:
-            torrent_path = posixpath.join(self.torrents_dir, torrent_hash + ".torrent")
+            torrent_path = posixpath.join(str(self.torrents_dir), torrent_hash + ".torrent")
             with open(torrent_path, "rb") as f:
                 return f.read()
         except Exception as e:
@@ -1089,35 +1106,76 @@ class DelugeClient(TorrentClient):
             return None
 
 
-def parse_libtc_url(url):
-    """Parse torrent client URL and extract connection parameters"""
-    # transmission+http://127.0.0.1:9091/?torrents_dir=/path
-    # rutorrent+http://RUTORRENT_ADDRESS:9380/plugins/rpc/rpc.php
-    # deluge://username:password@127.0.0.1:58664
-    # qbittorrent+http://username:password@127.0.0.1:8080
+class TorrentClientConfig(msgspec.Struct):
+    """Configuration for torrent client connection."""
+    
+    # Common fields
+    username: str | None = None
+    password: str | None = None
+    torrents_dir: str | None = None
+    
+    # For qBittorrent and rutorrent
+    url: str | None = None
+    
+    # For Transmission and Deluge
+    scheme: str | None = None
+    host: str | None = None
+    port: int | None = None
 
-    kwargs = {}
+
+def parse_libtc_url(url: str) -> TorrentClientConfig:
+    """Parse torrent client URL and extract connection parameters.
+    
+    Supported URL formats:
+    - transmission+http://127.0.0.1:9091/?torrents_dir=/path
+    - rutorrent+http://RUTORRENT_ADDRESS:9380/plugins/rpc/rpc.php
+    - deluge://username:password@127.0.0.1:58664
+    - qbittorrent+http://username:password@127.0.0.1:8080
+    
+    Args:
+        url: The torrent client URL to parse
+        
+    Returns:
+        TorrentClientConfig: Structured configuration object
+    """
     parsed = urlparse(url)
     scheme = parsed.scheme.split("+")
     netloc = parsed.netloc
-
+    
+    # Extract username and password if present
+    username = None
+    password = None
     if "@" in netloc:
         auth, netloc = netloc.rsplit("@", 1)
         username, password = auth.split(":", 1)
-        kwargs["username"] = username
-        kwargs["password"] = password
-
+    
     client = scheme[0]
+    
     if client in ["qbittorrent", "rutorrent"]:
-        kwargs["url"] = f"{scheme[1]}://{netloc}{parsed.path}"
+        # For qBittorrent and rutorrent, use URL format
+        client_url = f"{scheme[1]}://{netloc}{parsed.path}"
+        return TorrentClientConfig(
+            username=username,
+            password=password,
+            url=client_url,
+            torrents_dir=dict(parse_qsl(parsed.query)).get("torrents_dir")
+        )
     else:
-        kwargs["scheme"] = scheme[-1]
-        kwargs["host"], kwargs["port"] = netloc.split(":")
-        kwargs["port"] = int(kwargs["port"])
-
-    kwargs.update(dict(parse_qsl(parsed.query)))
-
-    return kwargs
+        # For Transmission and Deluge, use host:port format
+        host, port_str = netloc.split(":")
+        port = int(port_str)
+        
+        # Extract additional query parameters
+        query_params = dict(parse_qsl(parsed.query))
+        
+        return TorrentClientConfig(
+            username=username,
+            password=password,
+            scheme=scheme[-1],
+            host=host,
+            port=port,
+            torrents_dir=query_params.get("torrents_dir")
+        )
 
 
 # Torrent client factory mapping
