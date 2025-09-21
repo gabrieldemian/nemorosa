@@ -1,3 +1,4 @@
+import threading
 import traceback
 
 from colorama import Fore, Style
@@ -79,26 +80,29 @@ def generate_logger(loglevel="info"):
 
 
 # Global logger instance
-_current_logger = None
+_logger_instance: ColorLogger | None = None
+_logger_lock = threading.Lock()
 
 
-def get_logger():
-    """Get current logger instance.
+def get_logger() -> ColorLogger:
+    """Get global logger instance.
 
     Returns:
-        ColorLogger: Current logger instance.
+        ColorLogger: Logger instance.
     """
-    global _current_logger
-    if _current_logger is None:
-        _current_logger = generate_logger()
-    return _current_logger
+    global _logger_instance
+    with _logger_lock:
+        if _logger_instance is None:
+            _logger_instance = generate_logger()
+        return _logger_instance
 
 
-def set_logger(logger):
-    """Set current logger instance.
+def set_logger(logger: ColorLogger) -> None:
+    """Set global logger instance.
 
     Args:
         logger: Logger instance to set as current.
     """
-    global _current_logger
-    _current_logger = logger
+    global _logger_instance
+    with _logger_lock:
+        _logger_instance = logger

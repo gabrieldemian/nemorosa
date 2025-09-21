@@ -1,5 +1,6 @@
 import html
 import json
+import threading
 import time
 from urllib.parse import parse_qs, urljoin, urlparse
 
@@ -615,3 +616,32 @@ def get_api_instance(server: str, cookies: dict | None = None, api_key: str | No
     api_class = TRACKER_SPECS[server].api_type
 
     return api_class(cookies=cookies, api_key=api_key, server=server)
+
+
+# Global target_apis instance
+_target_apis_instance: list[GazelleJSONAPI | GazelleParser] | None = None
+_target_apis_lock = threading.Lock()
+
+
+def get_target_apis() -> list[GazelleJSONAPI | GazelleParser]:
+    """Get global target_apis instance.
+
+    Returns:
+        list[GazelleJSONAPI | GazelleParser]: Target APIs instance.
+    """
+    global _target_apis_instance
+    with _target_apis_lock:
+        if _target_apis_instance is None:
+            _target_apis_instance = []
+        return _target_apis_instance
+
+
+def set_target_apis(target_apis: list[GazelleJSONAPI | GazelleParser]) -> None:
+    """Set global target_apis instance.
+
+    Args:
+        target_apis: List of target API connections to set as current.
+    """
+    global _target_apis_instance
+    with _target_apis_lock:
+        _target_apis_instance = target_apis

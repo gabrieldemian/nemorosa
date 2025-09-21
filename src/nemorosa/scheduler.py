@@ -7,9 +7,8 @@ from typing import Any
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-from . import api, config, db, logger
+from . import config, db, logger
 from .core import NemorosaCore
-from .torrent_client import TorrentClient
 
 
 class JobType(Enum):
@@ -30,18 +29,8 @@ class JobManager:
         # Flag to track if search job was manually triggered
         self.search_job_manually_triggered = False
 
-    async def start_scheduler(
-        self, target_apis: list[api.GazelleJSONAPI | api.GazelleParser], torrent_client: TorrentClient
-    ):
-        """Start the scheduler with configured jobs.
-
-        Args:
-            target_apis: List of target API connections.
-            torrent_client: Torrent client instance.
-        """
-        self.target_apis = target_apis
-        self.torrent_client = torrent_client
-
+    async def start_scheduler(self):
+        """Start the scheduler with configured jobs."""
         # Add search job if configured
         if config.cfg.server.search_cadence_seconds:
             self._add_search_job()
@@ -130,7 +119,7 @@ class JobManager:
             self.database.update_job_run(job_name, start_time, next_run_time)
 
             # Run the actual search process
-            processor = NemorosaCore(self.torrent_client, self.target_apis)
+            processor = NemorosaCore()
             processor.process_torrents()
 
             # Record successful completion
@@ -158,7 +147,7 @@ class JobManager:
             self.database.update_job_run(job_name, start_time, next_run_time)
 
             # Run cleanup process
-            processor = NemorosaCore(self.torrent_client, self.target_apis)
+            processor = NemorosaCore()
             processor.retry_undownloaded_torrents()
 
             # Then post-process injected torrents

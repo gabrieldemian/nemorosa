@@ -7,22 +7,16 @@ from urllib.parse import parse_qs, urlparse
 
 import torf
 
-from . import api, config, db, filecompare, logger
-from .torrent_client import ClientTorrentInfo, TorrentClient, TorrentConflictError, TorrentState
+from . import api, config, db, filecompare, logger, torrent_client
+from .torrent_client import ClientTorrentInfo, TorrentConflictError, TorrentState
 
 
 class NemorosaCore:
     """Main class for processing torrents and cross-seeding operations."""
 
-    def __init__(self, torrent_client: TorrentClient, target_apis: list[api.GazelleJSONAPI | api.GazelleParser]):
-        """Initialize the torrent processor.
-
-        Args:
-            torrent_client: Torrent client instance for managing torrents
-            target_apis: List of target site API configurations
-        """
-        self.torrent_client = torrent_client
-        self.target_apis = target_apis
+    def __init__(self):
+        """Initialize the torrent processor."""
+        self.torrent_client = torrent_client.get_torrent_client()
         self.database = db.get_database()
         self.stats = {
             "found": 0,
@@ -520,7 +514,7 @@ class NemorosaCore:
         any_success = False
         existing_target_trackers = set(torrent_details.existing_target_trackers)
 
-        for api_instance in self.target_apis:
+        for api_instance in api.get_target_apis():
             self.logger.debug(f"Trying target site: {api_instance.server} (tracker: {api_instance.tracker_query})")
 
             # Check if this content already exists on current target tracker
@@ -551,7 +545,7 @@ class NemorosaCore:
         self.logger.section("===== Processing Torrents =====")
 
         # Extract target_trackers from target_apis
-        target_trackers = [api_instance.tracker_query for api_instance in self.target_apis]
+        target_trackers = [api_instance.tracker_query for api_instance in api.get_target_apis()]
 
         # Reset stats for this processing session
         self.stats = {"found": 0, "downloaded": 0, "scanned": 0, "cnt_dl_fail": 0}
@@ -577,9 +571,7 @@ class NemorosaCore:
 
                 # Record processed torrents (scan history handled inside scan function)
                 if any_success:
-                    self.logger.success("Torrent processed successfully on at least one target site")
-                else:
-                    self.logger.warning("Torrent not found on any target sites")
+                    self.logger.success("Torrent processed successfully")
 
         except Exception as e:
             self.logger.error("Error processing torrents: %s", e)
@@ -600,7 +592,7 @@ class NemorosaCore:
 
         try:
             # Process undownloaded torrents for each target site
-            for api_instance in self.target_apis:
+            for api_instance in api.get_target_apis():
                 site_host = urlparse(api_instance.server).netloc
                 self.logger.debug(f"Processing undownloaded torrents for site: {api_instance.server}")
 
@@ -798,7 +790,7 @@ class NemorosaCore:
 
         try:
             # Extract target_trackers from target_apis
-            target_trackers = [api_instance.tracker_query for api_instance in self.target_apis]
+            target_trackers = [api_instance.tracker_query for api_instance in api.get_target_apis()]
 
             # Get torrent details from torrent client with existing trackers info
             torrent_info = self.torrent_client.get_single_torrent(infohash, target_trackers)
@@ -901,12 +893,12 @@ class NemorosaCore:
 
             # Check if incoming torrent may trump local torrent
             for matched_torrent in matched_torrents:
-                for api_instance in self.target_apis:
+                for api_instance in api.get_target_apis():
                     # Check if local matched torrent contains tracker consistent with incoming torrent
                     local_hostname = urlparse(matched_torrent.trackers[0]).hostname
                     incoming_hostname = urlparse(torrent_object.trackers.flat[0]).hostname
                     if (
-                        local_hostname is not None 
+                        local_hostname is not None
                         and incoming_hostname is not None
                         and api_instance.tracker_query in local_hostname
                         and api_instance.tracker_query in incoming_hostname

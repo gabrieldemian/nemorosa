@@ -8,6 +8,7 @@ Transmission, qBittorrent, and Deluge.
 import base64
 import os
 import posixpath
+import threading
 import time
 from abc import ABC, abstractmethod
 from enum import Enum
@@ -440,7 +441,7 @@ class TorrentClient(ABC):
                 else:
                     self.logger.error(f"Failed to inject torrent after {max_retries} attempts: {e}")
                     return False
-        
+
         # This should never be reached, but just in case
         return False
 
@@ -633,7 +634,7 @@ class TransmissionClient(TorrentClient):
         super().__init__()
         config = parse_libtc_url(url)
         self.torrents_dir = config.torrents_dir or "/config/torrents"
-        
+
         self.client = transmission_rpc.Client(
             host=config.host or "localhost",
             port=config.port or 9091,
@@ -792,7 +793,7 @@ class QBittorrentClient(TorrentClient):
     def __init__(self, url: str):
         super().__init__()
         config = parse_libtc_url(url)
-        
+
         self.client = qbittorrentapi.Client(
             host=config.url or "http://localhost:8080",
             username=config.username,
@@ -1108,15 +1109,15 @@ class DelugeClient(TorrentClient):
 
 class TorrentClientConfig(msgspec.Struct):
     """Configuration for torrent client connection."""
-    
+
     # Common fields
     username: str | None = None
     password: str | None = None
     torrents_dir: str | None = None
-    
+
     # For qBittorrent and rutorrent
     url: str | None = None
-    
+
     # For Transmission and Deluge
     scheme: str | None = None
     host: str | None = None
@@ -1125,32 +1126,32 @@ class TorrentClientConfig(msgspec.Struct):
 
 def parse_libtc_url(url: str) -> TorrentClientConfig:
     """Parse torrent client URL and extract connection parameters.
-    
+
     Supported URL formats:
     - transmission+http://127.0.0.1:9091/?torrents_dir=/path
     - rutorrent+http://RUTORRENT_ADDRESS:9380/plugins/rpc/rpc.php
     - deluge://username:password@127.0.0.1:58664
     - qbittorrent+http://username:password@127.0.0.1:8080
-    
+
     Args:
         url: The torrent client URL to parse
-        
+
     Returns:
         TorrentClientConfig: Structured configuration object
     """
     parsed = urlparse(url)
     scheme = parsed.scheme.split("+")
     netloc = parsed.netloc
-    
+
     # Extract username and password if present
     username = None
     password = None
     if "@" in netloc:
         auth, netloc = netloc.rsplit("@", 1)
         username, password = auth.split(":", 1)
-    
+
     client = scheme[0]
-    
+
     if client in ["qbittorrent", "rutorrent"]:
         # For qBittorrent and rutorrent, use URL format
         client_url = f"{scheme[1]}://{netloc}{parsed.path}"
@@ -1158,23 +1159,23 @@ def parse_libtc_url(url: str) -> TorrentClientConfig:
             username=username,
             password=password,
             url=client_url,
-            torrents_dir=dict(parse_qsl(parsed.query)).get("torrents_dir")
+            torrents_dir=dict(parse_qsl(parsed.query)).get("torrents_dir"),
         )
     else:
         # For Transmission and Deluge, use host:port format
         host, port_str = netloc.split(":")
         port = int(port_str)
-        
+
         # Extract additional query parameters
         query_params = dict(parse_qsl(parsed.query))
-        
+
         return TorrentClientConfig(
             username=username,
             password=password,
             scheme=scheme[-1],
             host=host,
             port=port,
-            torrents_dir=query_params.get("torrents_dir")
+            torrents_dir=query_params.get("torrents_dir"),
         )
 
 
@@ -1195,3 +1196,34 @@ def create_torrent_client(url: str) -> TorrentClient:
         raise ValueError(f"Unsupported torrent client type: {client_type}")
 
     return TORRENT_CLIENT_MAPPING[client_type](url)
+
+
+# Global torrent client instance
+_torrent_client_instance: TorrentClient | None = None
+_torrent_client_lock = threading.Lock()
+
+
+def get_torrent_client() -> TorrentClient:
+    """Get global torrent client instance.
+
+    Returns:
+        TorrentClient: Torrent client instance.
+    """
+    global _torrent_client_instance
+    with _torrent_client_lock:
+        if _torrent_client_instance is None:
+            # Get client URL from config
+            client_url = config.cfg.downloader.client
+            _torrent_client_instance = create_torrent_client(client_url)
+        return _torrent_client_instance
+
+
+def set_torrent_client(torrent_client: TorrentClient) -> None:
+    """Set global torrent client instance.
+
+    Args:
+        torrent_client: Torrent client instance to set as current.
+    """
+    global _torrent_client_instance
+    with _torrent_client_lock:
+        _torrent_client_instance = torrent_client

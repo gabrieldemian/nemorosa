@@ -10,7 +10,6 @@ from pydantic import BaseModel
 
 from . import api, config, logger, scheduler
 from .core import NemorosaCore
-from .torrent_client import create_torrent_client
 
 
 class WebhookResponse(BaseModel):
@@ -39,28 +38,17 @@ class AnnounceRequest(BaseModel):
     torrentdata: str  # Base64 encoded torrent data
 
 
-# Global variables
-app_logger: logger.ColorLogger | None = None
-target_apis: list[api.GazelleJSONAPI | api.GazelleParser] | None = None
-job_manager: scheduler.JobManager | None = None
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for FastAPI app."""
-    global job_manager, app_logger, target_apis
-
-    # Initialize logger if not already done
-    if app_logger is None:
-        app_logger = logger.get_logger()
+    # Get logger and job manager
+    app_logger = logger.get_logger()
+    job_manager = scheduler.get_job_manager()
 
     # Startup
-    if job_manager and target_apis:
-        # Create torrent client for scheduler
-        torrent_client = create_torrent_client(config.cfg.downloader.client)
-
+    if job_manager and api.get_target_apis():
         # Start scheduler
-        await job_manager.start_scheduler(target_apis, torrent_client)
+        await job_manager.start_scheduler()
         app_logger.info("Scheduler started with configured jobs")
 
     yield
@@ -100,13 +88,12 @@ def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     """Log all requests."""
-    if app_logger:
-        app_logger.debug(f"Incoming request: {request.method} {request.url}")
+    app_logger = logger.get_logger()
+    app_logger.debug(f"Incoming request: {request.method} {request.url}")
 
     response = await call_next(request)
 
-    if app_logger:
-        app_logger.debug(f"Response: {response.status_code}")
+    app_logger.debug(f"Response: {response.status_code}")
 
     return response
 
@@ -142,14 +129,8 @@ async def webhook(infoHash: str = Query(..., description="Torrent infohash"), _:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="infoHash cannot be empty")
 
     try:
-        # Create torrent client using global config
-        torrent_client = create_torrent_client(config.cfg.downloader.client)
-
-        # Use the provided target_apis
-        current_target_apis = globals()["target_apis"]
-
         # Process the torrent
-        processor = NemorosaCore(torrent_client, current_target_apis)
+        processor = NemorosaCore()
         result = processor.process_single_torrent(infoHash)
 
         return WebhookResponse(status="success", message="Torrent processed successfully", data=result)
@@ -157,8 +138,8 @@ async def webhook(infoHash: str = Query(..., description="Torrent infohash"), _:
     except HTTPException:
         raise
     except Exception as e:
-        if app_logger:
-            app_logger.error(f"Error processing torrent {infoHash}: {str(e)}")
+        app_logger = logger.get_logger()
+        app_logger.error(f"Error processing torrent {infoHash}: {str(e)}")
 
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal server error: {str(e)}"
@@ -200,18 +181,12 @@ async def announce(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid base64 torrent data: {str(e)}"
             ) from e
 
-        # Create torrent client using global config
-        torrent_client = create_torrent_client(config.cfg.downloader.client)
-
-        # Use the provided target_apis
-        current_target_apis = globals()["target_apis"]
-
         # Log the announce
-        if app_logger:
-            app_logger.info(f"Received announce for torrent: {request.name} from {request.link}")
+        app_logger = logger.get_logger()
+        app_logger.info(f"Received announce for torrent: {request.name} from {request.link}")
 
         # Process the torrent for cross-seeding using the reverse announce function
-        processor = NemorosaCore(torrent_client, current_target_apis)
+        processor = NemorosaCore()
         result = processor.process_reverse_announce_torrent(
             torrent_name=request.name,
             torrent_link=request.link,
@@ -231,8 +206,8 @@ async def announce(
     except HTTPException:
         raise
     except Exception as e:
-        if app_logger:
-            app_logger.error(f"Error processing torrent announce {request.name}: {str(e)}")
+        app_logger = logger.get_logger()
+        app_logger.error(f"Error processing torrent announce {request.name}: {str(e)}")
 
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal server error: {str(e)}"
@@ -288,8 +263,8 @@ async def trigger_job(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid job type: {str(e)}") from e
     except Exception as e:
-        if app_logger:
-            app_logger.error(f"Error triggering job {job_type}: {str(e)}")
+        app_logger = logger.get_logger()
+        app_logger.error(f"Error triggering job {job_type}: {str(e)}")
 
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal server error: {str(e)}"
@@ -339,8 +314,8 @@ async def get_job_status(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid job type: {str(e)}") from e
     except Exception as e:
-        if app_logger:
-            app_logger.error(f"Error getting job status for {job_type}: {str(e)}")
+        app_logger = logger.get_logger()
+        app_logger.error(f"Error getting job status for {job_type}: {str(e)}")
 
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal server error: {str(e)}"
@@ -351,7 +326,6 @@ def run_webserver(
     host: str | None = None,
     port: int | None = None,
     log_level: str = "info",
-    target_apis: list[api.GazelleJSONAPI | api.GazelleParser] | None = None,
 ):
     """Run the web server.
 
@@ -359,21 +333,14 @@ def run_webserver(
         host: Server host (if None, use config value)
         port: Server port (if None, use config value)
         log_level: Log level
-        target_apis: List of target API connections
     """
-    global app_logger, job_manager
-
     # Use config values if not provided
     if host is None:
         host = config.cfg.server.host
     if port is None:
         port = config.cfg.server.port
 
-    # Set global variables
-    globals()["target_apis"] = target_apis
-    job_manager = scheduler.get_job_manager()
-
-    # Set up logger
+    # Get logger
     app_logger = logger.get_logger()
 
     # Log server startup

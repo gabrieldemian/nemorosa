@@ -330,13 +330,13 @@ def init_config(config_path: str | None = None) -> None:
     try:
         cfg = setup_config(config_path)
         # Log successful configuration loading
-        log = logger.generate_logger("info")
+        log = logger.get_logger()
         actual_config_path = find_config_path(config_path)
         log.info(f"Configuration loaded successfully from: {actual_config_path}")
     except ValueError as e:
         if "Configuration file not found" in str(e):
             # Configuration file doesn't exist, create default configuration file
-            log = logger.generate_logger("info")
+            log = logger.get_logger()
             log.warning("Configuration file not found. Creating default configuration...")
 
             # Determine configuration file path

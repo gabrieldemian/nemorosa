@@ -319,12 +319,12 @@ class TorrentDatabase:
 
 
 # Global database instance
-_db_instance = None
+_db_instance: TorrentDatabase | None = None
 _db_lock = threading.Lock()
 
 
 def get_database(db_path: str | None = None) -> TorrentDatabase:
-    """Get global database instance (singleton pattern).
+    """Get global database instance.
 
     Args:
         db_path (str, optional): Database file path, if None uses nemorosa.db in config directory.
