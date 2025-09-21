@@ -73,6 +73,7 @@ class TorrentDatabase:
                     site_host TEXT DEFAULT 'default',
                     matched_torrent_id TEXT,
                     matched_torrent_hash TEXT,
+                    checked BOOLEAN NOT NULL DEFAULT FALSE,
                     scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (local_torrent_hash, site_host)
                 )
@@ -106,6 +107,10 @@ class TorrentDatabase:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_scan_results_local_torrent_hash ON scan_results(local_torrent_hash)"
             )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_scan_results_matched_checked "
+                "ON scan_results(matched_torrent_hash, checked)"
+            )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_undownloaded_site_host ON undownloaded_torrents(site_host)")
 
     # ================== Scan results related methods ==================
@@ -135,28 +140,19 @@ class TorrentDatabase:
                 (local_torrent_hash, local_torrent_name, matched_torrent_id, site_host, matched_torrent_hash),
             )
 
-    def is_hash_scanned(self, local_torrent_hash: str, site_host: str = None) -> bool:
-        """Check if specified local torrent hash has been scanned.
+    def is_hash_scanned(self, local_torrent_hash: str) -> bool:
+        """Check if specified local torrent hash has been scanned on any site.
 
         Args:
             local_torrent_hash (str): Local torrent hash.
-            site_host (str, optional): Site hostname, if None checks all sites.
 
         Returns:
-            bool: True if scanned, False otherwise.
+            bool: True if scanned on any site, False otherwise.
         """
         with self.connection as conn:
-            if site_host is None:
-                # Check all sites
-                cursor = conn.execute(
-                    "SELECT 1 FROM scan_results WHERE local_torrent_hash = ? LIMIT 1", (local_torrent_hash,)
-                )
-            else:
-                # Check specific site
-                cursor = conn.execute(
-                    "SELECT 1 FROM scan_results WHERE local_torrent_hash = ? AND site_host = ? LIMIT 1",
-                    (local_torrent_hash, site_host),
-                )
+            cursor = conn.execute(
+                "SELECT 1 FROM scan_results WHERE local_torrent_hash = ? LIMIT 1", (local_torrent_hash,)
+            )
             return cursor.fetchone() is not None
 
     # ================== Undownloaded torrents related methods ==================
@@ -221,7 +217,7 @@ class TorrentDatabase:
             )
 
     def get_matched_scan_results(self) -> dict[str, dict[str, Any]]:
-        """Get scan results with matched torrent hash for all sites.
+        """Get scan results with matched torrent hash for all sites that haven't been checked.
 
         Returns:
             dict[str, dict[str, Any]]: Dictionary mapping matched_torrent_hash to scan result information.
@@ -229,7 +225,7 @@ class TorrentDatabase:
         with self.connection as conn:
             cursor = conn.execute(
                 "SELECT local_torrent_hash, local_torrent_name, matched_torrent_id, matched_torrent_hash, site_host "
-                "FROM scan_results WHERE matched_torrent_hash IS NOT NULL"
+                "FROM scan_results WHERE matched_torrent_hash IS NOT NULL AND checked = FALSE"
             )
             result = {}
             for row in cursor.fetchall():
@@ -240,6 +236,32 @@ class TorrentDatabase:
                     "site_host": row["site_host"],
                 }
             return result
+
+    def update_scan_result_checked(self, matched_torrent_hash: str, checked: bool):
+        """Update checked status for a scan result.
+
+        Args:
+            matched_torrent_hash (str): Matched torrent hash.
+            checked (bool): Checked status.
+        """
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE scan_results SET checked = ? WHERE matched_torrent_hash = ?",
+                (checked, matched_torrent_hash),
+            )
+
+    def clear_matched_torrent_info(self, matched_torrent_hash: str):
+        """Clear matched torrent information for a scan result.
+
+        Args:
+            matched_torrent_hash (str): Matched torrent hash.
+        """
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE scan_results SET matched_torrent_id = NULL, matched_torrent_hash = NULL "
+                "WHERE matched_torrent_hash = ?",
+                (matched_torrent_hash,),
+            )
 
     # ================== Job log related methods ==================
 

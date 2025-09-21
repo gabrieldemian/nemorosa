@@ -712,22 +712,12 @@ class NemorosaCore:
                     if matched_torrent.progress == 1.0:
                         stats["matches_completed"] += 1
                         self.logger.info(f"Matched torrent {matched_torrent.name} is 100% complete, starting download")
-
-                        # Check if matched torrent is already downloading
-                        if matched_torrent.progress > 0:
-                            stats["matches_already_downloading"] += 1
-                            self.logger.debug(f"Matched torrent {matched_torrent.name} is already downloading")
-                            continue
-
                         # Start downloading the matched torrent
-                        self.logger.info(f"Starting download for matched torrent: {matched_torrent.name}")
-                        if self.torrent_client.resume_torrent(matched_torrent.id):
-                            stats["matches_started_downloading"] += 1
-                            self.logger.success(f"Started downloading matched torrent: {matched_torrent.name}")
-                        else:
-                            stats["matches_failed"] += 1
-                            self.logger.error(f"Failed to start downloading matched torrent: {matched_torrent.name}")
-
+                        self.torrent_client.resume_torrent(matched_torrent.id)
+                        stats["matches_started_downloading"] += 1
+                        self.logger.success(f"Started downloading matched torrent: {matched_torrent.name}")
+                        # Mark as checked since it's 100% complete
+                        self.database.update_scan_result_checked(matched_torrent_hash, True)
                     # If matched torrent is not 100% complete, check file progress patterns
                     else:
                         self.logger.debug(
@@ -738,10 +728,14 @@ class NemorosaCore:
                         # Analyze file progress patterns
                         if self._should_keep_partial_torrent(matched_torrent):
                             self.logger.debug(f"Keeping partial torrent {matched_torrent.name} - valid pattern")
+                            # Mark as checked since we're keeping the partial torrent
+                            self.database.update_scan_result_checked(matched_torrent_hash, True)
                             continue
                         else:
                             self.logger.info(f"Removing failed match torrent {matched_torrent.name} - invalid pattern")
                             self.torrent_client._remove_torrent(matched_torrent.id)
+                            # Clear matched torrent information from database
+                            self.database.clear_matched_torrent_info(matched_torrent_hash)
                             stats["matches_failed"] += 1
 
                 except Exception as e:
@@ -809,7 +803,7 @@ class NemorosaCore:
             if not torrent_info:
                 return {
                     "status": "error",
-                    "message": f"Torrent with infohash {infohash} not found in client",
+                    "message": f"Torrent with infohash {infohash} not found in client or was filtered out",
                     "infohash": infohash,
                 }
 
@@ -878,6 +872,7 @@ class NemorosaCore:
             parsed_link = urlparse(torrent_link)
             query_params = parse_qs(parsed_link.query)
             tid = query_params["id"][0]
+            site_host = parsed_link.netloc
 
             self.logger.debug(f"Extracted torrent ID: {tid} from link: {torrent_link}")
 
@@ -940,13 +935,22 @@ class NemorosaCore:
                 else:
                     self.logger.error(f"Failed to inject torrent: {tid}")
 
+            # Record scan result: matching torrent found
+            self.database.add_scan_result(
+                local_torrent_hash=matched_torrent.hash,
+                local_torrent_name=matched_torrent.name,
+                matched_torrent_id=str(tid),
+                site_host=site_host,
+                matched_torrent_hash=torrent_object.infohash,
+            )
+
             if not downloaded:
                 torrent_info = {
                     "download_dir": matched_torrent.download_dir,
                     "local_torrent_name": matched_torrent.name,
                     "rename_map": rename_map,
                 }
-                self.database.add_undownloaded_torrent(str(tid), torrent_info, parsed_link.netloc)
+                self.database.add_undownloaded_torrent(str(tid), torrent_info, site_host)
 
             return {
                 "status": "success",

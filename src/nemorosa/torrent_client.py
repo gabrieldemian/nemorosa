@@ -184,25 +184,39 @@ class TorrentClient(ABC):
                     break
 
             if not target_torrent:
+                self.logger.debug(f"Torrent with infohash {infohash} not found in client torrent list")
                 return None
+
+            self.logger.debug(f"Found torrent: {target_torrent.name} ({infohash})")
 
             # Check if torrent meets basic conditions (same as get_filtered_torrents)
             check_trackers_list = config.cfg.global_config.check_trackers
             if check_trackers_list and not any(
                 any(check_str in url for check_str in check_trackers_list) for url in target_torrent.trackers
             ):
+                self.logger.debug(f"Torrent {target_torrent.name} filtered out: tracker not in check_trackers list")
+                self.logger.debug(f"Torrent trackers: {target_torrent.trackers}")
+                self.logger.debug(f"Required trackers: {check_trackers_list}")
                 return None
 
             # Filter MP3 files (based on configuration)
             if config.cfg.global_config.exclude_mp3:
                 has_mp3 = any(posixpath.splitext(file.name)[1].lower() == ".mp3" for file in target_torrent.files)
                 if has_mp3:
+                    self.logger.debug(
+                        f"Torrent {target_torrent.name} filtered out: contains MP3 files (exclude_mp3=true)"
+                    )
                     return None
 
             # Check if torrent contains music files (if check_music_only is enabled)
             if config.cfg.global_config.check_music_only:
                 has_music = any(filecompare.is_music_file(file.name) for file in target_torrent.files)
                 if not has_music:
+                    self.logger.debug(
+                        f"Torrent {target_torrent.name} filtered out: no music files found (check_music_only=true)"
+                    )
+                    file_extensions = [posixpath.splitext(f.name)[1].lower() for f in target_torrent.files]
+                    self.logger.debug(f"File extensions in torrent: {file_extensions}")
                     return None
 
             # Get content name and find all torrents with the same content name
@@ -233,8 +247,7 @@ class TorrentClient(ABC):
             )
 
         except Exception as e:
-            if self.logger:
-                self.logger.error("Error retrieving single torrent: %s", e)
+            self.logger.error("Error retrieving single torrent: %s", e)
             return None
 
     def get_filtered_torrents(self, target_trackers: list[str]) -> dict[str, ClientTorrentInfo]:
@@ -312,10 +325,9 @@ class TorrentClient(ABC):
 
                 # If this content already exists on all target trackers, skip
                 if target_tracker_set.issubset(existing_trackers):
-                    if self.logger:
-                        self.logger.debug(
-                            f"Skipping {content_name}: already exists on all target trackers {existing_trackers}"
-                        )
+                    self.logger.debug(
+                        f"Skipping {content_name}: already exists on all target trackers {existing_trackers}"
+                    )
                     continue
 
                 # Otherwise include in results
@@ -335,8 +347,7 @@ class TorrentClient(ABC):
             return filtered_torrents
 
         except Exception as e:
-            if self.logger:
-                self.logger.error("Error retrieving torrents: %s", e)
+            self.logger.error("Error retrieving torrents: %s", e)
             return {}
 
     def inject_torrent(
@@ -374,8 +385,7 @@ class TorrentClient(ABC):
                         "This usually happens because the source flag of the torrent to be injected is incorrect, "
                         "which generally occurs on trackers that do not enforce source flag requirements."
                     )
-                    if self.logger:
-                        self.logger.error(error_msg)
+                    self.logger.error(error_msg)
                     raise TorrentConflictError(error_msg)
 
                 # Get current torrent name
@@ -384,8 +394,7 @@ class TorrentClient(ABC):
                 # Rename entire torrent
                 if current_name != local_torrent_name:
                     self._rename_torrent(torrent_id, current_name, local_torrent_name)
-                    if self.logger:
-                        self.logger.debug(f"Renamed torrent from {current_name} to {local_torrent_name}")
+                    self.logger.debug(f"Renamed torrent from {current_name} to {local_torrent_name}")
 
                 # Process rename map only once
                 if not rename_map_processed:
@@ -402,8 +411,7 @@ class TorrentClient(ABC):
                             torrent_file_name,
                             local_file_name,
                         )
-                        if self.logger:
-                            self.logger.debug(f"Renamed torrent file {torrent_file_name} to {local_file_name}")
+                        self.logger.debug(f"Renamed torrent file {torrent_file_name} to {local_file_name}")
 
                 # Verify torrent (if renaming was performed or not hash match for non-Transmission clients)
                 should_verify = (
@@ -412,26 +420,21 @@ class TorrentClient(ABC):
                     or (not hash_match and not isinstance(self, TransmissionClient))
                 )
                 if should_verify:
-                    if self.logger:
-                        self.logger.debug("Verifying torrent after renaming")
+                    self.logger.debug("Verifying torrent after renaming")
                     time.sleep(1)
                     self._verify_torrent(torrent_id)
 
-                if self.logger:
-                    self.logger.success("Torrent injected successfully")
+                self.logger.success("Torrent injected successfully")
                 return True
             except TorrentConflictError as e:
-                if self.logger:
-                    self.logger.error(f"Torrent injection failed due to conflict: {e}")
+                self.logger.error(f"Torrent injection failed due to conflict: {e}")
                 raise
             except Exception as e:
                 if attempt < max_retries - 1:
-                    if self.logger:
-                        self.logger.debug(f"Error injecting torrent: {e}, retrying ({attempt + 1}/{max_retries})...")
+                    self.logger.debug(f"Error injecting torrent: {e}, retrying ({attempt + 1}/{max_retries})...")
                     time.sleep(2)
                 else:
-                    if self.logger:
-                        self.logger.error(f"Failed to inject torrent after {max_retries} attempts: {e}")
+                    self.logger.error(f"Failed to inject torrent after {max_retries} attempts: {e}")
                     return False
 
     # ===== The following methods need to be implemented by derived classes =====
@@ -544,8 +547,7 @@ class TorrentClient(ABC):
                 return torf.Torrent.read_stream(torrent_data)
             return None
         except Exception as e:
-            if self.logger:
-                self.logger.error(f"Error getting torrent object for hash {torrent_hash}: {e}")
+            self.logger.error(f"Error getting torrent object for hash {torrent_hash}: {e}")
             return None
 
     def reverse_inject_torrent(
@@ -572,8 +574,7 @@ class TorrentClient(ABC):
                 # Rename entire torrent
                 if current_name != new_name:
                     self._rename_torrent(torrent_id, current_name, new_name)
-                    if self.logger:
-                        self.logger.debug(f"Renamed torrent {torrent_id} from {current_name} to {new_name}")
+                    self.logger.debug(f"Renamed torrent {torrent_id} from {current_name} to {new_name}")
 
                 # Rename files according to reverse rename map
                 if reverse_rename_map:
@@ -583,25 +584,21 @@ class TorrentClient(ABC):
                             local_file_name,
                             incoming_file_name,
                         )
-                        if self.logger:
-                            self.logger.debug(
-                                f"Renamed file {local_file_name} to {incoming_file_name} in torrent {torrent_id}"
-                            )
+                        self.logger.debug(
+                            f"Renamed file {local_file_name} to {incoming_file_name} in torrent {torrent_id}"
+                        )
 
                 # Verify torrent after renaming
                 if current_name != new_name or reverse_rename_map:
-                    if self.logger:
-                        self.logger.debug(f"Verifying torrent {torrent_id} after reverse renaming")
+                    self.logger.debug(f"Verifying torrent {torrent_id} after reverse renaming")
                     self._verify_torrent(torrent_id)
 
                 results[str(torrent_id)] = True
-                if self.logger:
-                    self.logger.success(f"Reverse injection completed successfully for torrent {torrent_id}")
+                self.logger.success(f"Reverse injection completed successfully for torrent {torrent_id}")
 
             except Exception as e:
                 results[str(torrent_id)] = False
-                if self.logger:
-                    self.logger.error(f"Failed to reverse inject torrent {torrent_id}: {e}")
+                self.logger.error(f"Failed to reverse inject torrent {torrent_id}: {e}")
 
         return results
 
@@ -668,8 +665,7 @@ class TransmissionClient(TorrentClient):
             return result
 
         except Exception as e:
-            if self.logger:
-                self.logger.error("Error retrieving torrents from Transmission: %s", e)
+            self.logger.error("Error retrieving torrents from Transmission: %s", e)
             return []
 
     def _add_torrent(self, torrent_data, download_dir: str, hash_match: bool) -> str:
@@ -720,8 +716,7 @@ class TransmissionClient(TorrentClient):
                 piece_progress=torrent.pieces or [],
             )
         except Exception as e:
-            if self.logger:
-                self.logger.error("Error retrieving torrent info from Transmission: %s", e)
+            self.logger.error("Error retrieving torrent info from Transmission: %s", e)
             return None
 
     def _rename_torrent(self, torrent_id: str, old_name: str, new_name: str):
@@ -747,8 +742,7 @@ class TransmissionClient(TorrentClient):
             self.client.start_torrent(torrent_id)
             return True
         except Exception as e:
-            if self.logger:
-                self.logger.error(f"Failed to resume torrent {torrent_id}: {e}")
+            self.logger.error(f"Failed to resume torrent {torrent_id}: {e}")
             return False
 
     def _process_rename_map(self, torrent_id: str, base_path: str, rename_map: dict) -> dict:
@@ -776,8 +770,7 @@ class TransmissionClient(TorrentClient):
             with open(torrent_path, "rb") as f:
                 return f.read()
         except Exception as e:
-            if self.logger:
-                self.logger.error(f"Error getting torrent data from Transmission: {e}")
+            self.logger.error(f"Error getting torrent data from Transmission: {e}")
             return None
 
 
@@ -829,8 +822,7 @@ class QBittorrentClient(TorrentClient):
             return result
 
         except Exception as e:
-            if self.logger:
-                self.logger.error("Error retrieving torrents from qBittorrent: %s", e)
+            self.logger.error("Error retrieving torrents from qBittorrent: %s", e)
             return []
 
     def _add_torrent(self, torrent_data, download_dir: str, hash_match: bool) -> str:
@@ -880,8 +872,7 @@ class QBittorrentClient(TorrentClient):
                 piece_progress=[piece == 2 for piece in torrent.pieceStates] if torrent.pieceStates else [],
             )
         except Exception as e:
-            if self.logger:
-                self.logger.error("Error retrieving torrent info from qBittorrent: %s", e)
+            self.logger.error("Error retrieving torrent info from qBittorrent: %s", e)
             return None
 
     def _rename_torrent(self, torrent_id: str, old_name: str, new_name: str):
@@ -909,8 +900,7 @@ class QBittorrentClient(TorrentClient):
             self.client.torrents_resume(torrent_hashes=torrent_id)
             return True
         except Exception as e:
-            if self.logger:
-                self.logger.error(f"Failed to resume torrent {torrent_id}: {e}")
+            self.logger.error(f"Failed to resume torrent {torrent_id}: {e}")
             return False
 
     def _process_rename_map(self, torrent_id: str, base_path: str, rename_map: dict) -> dict:
@@ -928,8 +918,7 @@ class QBittorrentClient(TorrentClient):
             torrent_data = self.client.torrents_export(torrent_hash=torrent_hash)
             return torrent_data
         except Exception as e:
-            if self.logger:
-                self.logger.error(f"Error getting torrent data from qBittorrent: {e}")
+            self.logger.error(f"Error getting torrent data from qBittorrent: {e}")
             return None
 
 
@@ -978,8 +967,7 @@ class DelugeClient(TorrentClient):
             return result
 
         except Exception as e:
-            if self.logger:
-                self.logger.error("Error retrieving torrents from Deluge: %s", e)
+            self.logger.error("Error retrieving torrents from Deluge: %s", e)
             return []
 
     def _add_torrent(self, torrent_data, download_dir: str, hash_match: bool) -> str:
@@ -987,8 +975,7 @@ class DelugeClient(TorrentClient):
         torrent_b64 = base64.b64encode(torrent_data).decode()
 
         try:
-            if self.logger:
-                self.logger.info("Adding torrent to Deluge...")
+            self.logger.info("Adding torrent to Deluge...")
 
             torrent_id = self.client.call(
                 "core.add_torrent_file",
@@ -1015,8 +1002,7 @@ class DelugeClient(TorrentClient):
 
             return torrent_id
         except Exception as e:
-            if self.logger:
-                self.logger.error(f"Failed to add torrent: {e}")
+            self.logger.error(f"Failed to add torrent: {e}")
             return None
 
     def _remove_torrent(self, torrent_id: str):
@@ -1048,8 +1034,7 @@ class DelugeClient(TorrentClient):
                 piece_progress=torrent_info.get("pieces", []),
             )
         except Exception as e:
-            if self.logger:
-                self.logger.error("Error retrieving torrent info from Deluge: %s", e)
+            self.logger.error("Error retrieving torrent info from Deluge: %s", e)
             return None
 
     def _rename_torrent(self, torrent_id: str, old_name: str, new_name: str):
@@ -1061,8 +1046,7 @@ class DelugeClient(TorrentClient):
         try:
             self.client.call("core.rename_files", torrent_id, [(old_path, new_name)])
         except Exception as e:
-            if self.logger:
-                self.logger.warning(f"Failed to rename file in Deluge: {e}")
+            self.logger.warning(f"Failed to rename file in Deluge: {e}")
 
     def _verify_torrent(self, torrent_id: str):
         """Verify torrent integrity."""
@@ -1080,8 +1064,7 @@ class DelugeClient(TorrentClient):
             self.client.call("core.resume_torrent", [torrent_id])
             return True
         except Exception as e:
-            if self.logger:
-                self.logger.error(f"Failed to resume torrent {torrent_id}: {e}")
+            self.logger.error(f"Failed to resume torrent {torrent_id}: {e}")
             return False
 
     def _process_rename_map(self, torrent_id: str, base_path: str, rename_map: dict) -> dict:
@@ -1104,8 +1087,7 @@ class DelugeClient(TorrentClient):
             with open(torrent_path, "rb") as f:
                 return f.read()
         except Exception as e:
-            if self.logger:
-                self.logger.error(f"Error getting torrent data from Deluge: {e}")
+            self.logger.error(f"Error getting torrent data from Deluge: {e}")
             return None
 
 
