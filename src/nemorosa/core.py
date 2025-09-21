@@ -110,7 +110,7 @@ class NemorosaCore:
         Returns:
             int | None: Torrent ID if found, None otherwise.
         """
-        self.logger.debug("Hash search failed or not available, falling back to filename search")
+        self.logger.debug("No torrent found by hash, falling back to filename search")
         # search for the files with top 5 longest name
         tid = None
         scan_querys = []
@@ -608,7 +608,7 @@ class NemorosaCore:
                     self.logger.debug(f"No undownloaded torrents found for site: {api_instance.server}")
                     continue
 
-                self.logger.info(
+                self.logger.debug(
                     f"Found {len(undownloaded_torrents)} undownloaded torrents for site: {api_instance.server}"
                 )
 
@@ -732,7 +732,7 @@ class NemorosaCore:
                             self.database.update_scan_result_checked(matched_torrent_hash, True)
                             continue
                         else:
-                            self.logger.info(f"Removing failed match torrent {matched_torrent.name} - invalid pattern")
+                            self.logger.warning(f"Removing torrent {matched_torrent.name} - failed validation")
                             self.torrent_client._remove_torrent(matched_torrent.id)
                             # Clear matched torrent information from database
                             self.database.clear_matched_torrent_info(matched_torrent_hash)
@@ -904,7 +904,7 @@ class NemorosaCore:
                         api_instance.tracker_query in urlparse(matched_torrent.trackers[0]).hostname
                         and api_instance.tracker_query in urlparse(torrent_object.trackers.flat[0]).hostname
                     ):
-                        self.logger.info(
+                        self.logger.warning(
                             f"Incoming torrent {tid} may trump local torrent {matched_torrent.hash}, "
                             "skipping processing"
                         )

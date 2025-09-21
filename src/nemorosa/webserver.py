@@ -98,12 +98,12 @@ def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)
 async def log_requests(request: Request, call_next):
     """Log all requests."""
     if app_logger:
-        app_logger.info(f"Incoming request: {request.method} {request.url}")
+        app_logger.debug(f"Incoming request: {request.method} {request.url}")
 
     response = await call_next(request)
 
     if app_logger:
-        app_logger.info(f"Response: {response.status_code}")
+        app_logger.debug(f"Response: {response.status_code}")
 
     return response
 

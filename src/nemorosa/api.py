@@ -362,9 +362,7 @@ class GazelleJSONAPI(GazelleBase):
                 self.logger.debug(f"Hash search successful for hash '{torrent_hash}'")
                 return response
             else:
-                self.logger.debug(
-                    f"Hash search failed for hash '{torrent_hash}': {response.get('error', 'Unknown error')}"
-                )
+                self.logger.debug(f"No torrent found matching hash '{torrent_hash}'")
                 return None
         except Exception as e:
             self.logger.error(f"Error searching for torrent by hash '{torrent_hash}': {e}")
@@ -393,7 +391,7 @@ class GazelleParser(GazelleBase):
 
         if cookies:
             self.session.cookies.update(cookies)
-            self.logger.info("Using provided cookies")
+            self.logger.debug("Using provided cookies")
         else:
             self.logger.warning("No cookies provided")
 
@@ -437,9 +435,7 @@ class GazelleParser(GazelleBase):
                 self.logger.debug(f"Hash search successful for hash '{torrent_hash}'")
                 return response
             else:
-                self.logger.debug(
-                    f"Hash search failed for hash '{torrent_hash}': {response.get('error', 'Unknown error')}"
-                )
+                self.logger.debug(f"No torrent found matching hash '{torrent_hash}'")
                 return None
         except Exception as e:
             self.logger.error(f"Error searching for torrent by hash '{torrent_hash}': {e}")

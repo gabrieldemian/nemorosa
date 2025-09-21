@@ -975,8 +975,6 @@ class DelugeClient(TorrentClient):
         torrent_b64 = base64.b64encode(torrent_data).decode()
 
         try:
-            self.logger.info("Adding torrent to Deluge...")
-
             torrent_id = self.client.call(
                 "core.add_torrent_file",
                 f"{os.urandom(16).hex()}.torrent",  # filename

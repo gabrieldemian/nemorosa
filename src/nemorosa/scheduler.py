@@ -64,10 +64,11 @@ class JobManager:
                 id=JobType.SEARCH.value,
                 name="Search Job",
                 max_instances=1,
+                misfire_grace_time=60,
                 coalesce=True,
                 replace_existing=True,
             )
-            self.logger.info(f"Added search job with cadence: {config.cfg.server.search_cadence}")
+            self.logger.debug(f"Added search job with cadence: {config.cfg.server.search_cadence}")
         except Exception as e:
             self.logger.error(f"Failed to add search job: {e}")
 
@@ -82,9 +83,11 @@ class JobManager:
                 id=JobType.CLEANUP.value,
                 name="Cleanup Job",
                 max_instances=1,
+                misfire_grace_time=60,
+                coalesce=True,
                 replace_existing=True,
             )
-            self.logger.info(f"Added cleanup job with cadence: {config.cfg.server.cleanup_cadence}")
+            self.logger.debug(f"Added cleanup job with cadence: {config.cfg.server.cleanup_cadence}")
         except Exception as e:
             self.logger.error(f"Failed to add cleanup job: {e}")
 
@@ -98,11 +101,11 @@ class JobManager:
 
         # Check if job should be skipped due to recent manual trigger (only for scheduled runs)
         if not is_manual_trigger and self.search_job_manually_triggered:
-            self.logger.info(f"Skipping {job_name} job - job was manually triggered recently")
+            self.logger.debug(f"Skipping {job_name} job - job was manually triggered recently")
             self.search_job_manually_triggered = False
             return
 
-        self.logger.info(f"Starting {job_name} job")
+        self.logger.debug(f"Starting {job_name} job")
 
         try:
             # Record job start
@@ -132,7 +135,7 @@ class JobManager:
 
             # Record successful completion
             end_time = int(datetime.now().timestamp())
-            self.logger.info(f"Completed {job_name} job in {end_time - start_time} seconds")
+            self.logger.debug(f"Completed {job_name} job in {end_time - start_time} seconds")
 
         except Exception as e:
             self.logger.error(f"Error in {job_name} job: {e}")
@@ -140,7 +143,7 @@ class JobManager:
     async def _run_cleanup_job(self):
         """Run cleanup job."""
         job_name = JobType.CLEANUP.value
-        self.logger.info(f"Starting {job_name} job")
+        self.logger.debug(f"Starting {job_name} job")
 
         try:
             # Record job start
@@ -163,7 +166,7 @@ class JobManager:
 
             # Record successful completion
             end_time = int(datetime.now().timestamp())
-            self.logger.info(f"Completed {job_name} job in {end_time - start_time} seconds")
+            self.logger.debug(f"Completed {job_name} job in {end_time - start_time} seconds")
 
         except Exception as e:
             self.logger.error(f"Error in {job_name} job: {e}")
@@ -178,7 +181,7 @@ class JobManager:
             Dictionary with trigger result.
         """
         job_name = job_type.value
-        self.logger.info(f"Triggering {job_name} job early")
+        self.logger.debug(f"Triggering {job_name} job early")
 
         try:
             # Check if job exists and is enabled
@@ -199,7 +202,7 @@ class JobManager:
             elif job_type == JobType.CLEANUP:
                 await self._run_cleanup_job()
 
-            self.logger.info(f"Successfully triggered {job_name} job")
+            self.logger.debug(f"Successfully triggered {job_name} job")
             return {
                 "status": "success",
                 "message": f"Job {job_name} triggered successfully",

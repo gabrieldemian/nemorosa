@@ -298,23 +298,23 @@ def main():
             )
         elif args.torrent:
             # Single torrent mode
-            app_logger.info(f"Processing single torrent: {args.torrent}")
+            app_logger.debug(f"Processing single torrent: {args.torrent}")
 
             processor = NemorosaCore(torrent_client, target_apis)
             result = processor.process_single_torrent(args.torrent)
 
             # Print result
-            app_logger.info(f"Processing result: {result['status']}")
-            app_logger.info(f"Message: {result['message']}")
+            app_logger.debug(f"Processing result: {result['status']}")
+            app_logger.debug(f"Message: {result['message']}")
             if result.get("torrent_name"):
-                app_logger.info(f"Torrent name: {result['torrent_name']}")
+                app_logger.debug(f"Torrent name: {result['torrent_name']}")
             if result.get("infohash"):
-                app_logger.info(f"Torrent infohash: {result['infohash']}")
+                app_logger.debug(f"Torrent infohash: {result['infohash']}")
             if result.get("existing_trackers"):
-                app_logger.info(f"Existing trackers: {result['existing_trackers']}")
+                app_logger.debug(f"Existing trackers: {result['existing_trackers']}")
             if result.get("stats"):
                 stats = result["stats"]
-                app_logger.info(
+                app_logger.debug(
                     f"Stats - Found: {stats.get('found', 0)}, "
                     f"Downloaded: {stats.get('downloaded', 0)}, "
                     f"Scanned: {stats.get('scanned', 0)}"
