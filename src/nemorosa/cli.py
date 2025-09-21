@@ -77,6 +77,15 @@ def setup_argument_parser(config_defaults):
         help="retry downloading torrents from undownloaded_torrents table",
     )
 
+    # post-process injected torrents option
+    parser.add_argument(
+        "-p",
+        "--process-completed-matches",
+        action="store_true",
+        default=False,
+        help="post-process injected torrents",
+    )
+
     # server mode option
     parser.add_argument(
         "-s",
@@ -314,6 +323,10 @@ def main():
             # Re-download undownloaded torrents
             processor = NemorosaCore(torrent_client, target_apis)
             processor.retry_undownloaded_torrents()
+        elif args.process_completed_matches:
+            # Post-process injected torrents only
+            processor = NemorosaCore(torrent_client, target_apis)
+            processor.post_process_injected_torrents()
         else:
             # Normal torrent processing flow
             processor = NemorosaCore(torrent_client, target_apis)

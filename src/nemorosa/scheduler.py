@@ -158,6 +158,9 @@ class JobManager:
             processor = NemorosaCore(self.torrent_client, self.target_apis)
             processor.retry_undownloaded_torrents()
 
+            # Then post-process injected torrents
+            processor.post_process_injected_torrents()
+
             # Record successful completion
             end_time = int(datetime.now().timestamp())
             self.logger.info(f"Completed {job_name} job in {end_time - start_time} seconds")

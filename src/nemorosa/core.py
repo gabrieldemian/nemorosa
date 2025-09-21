@@ -1,13 +1,14 @@
 """Core processing functions for nemorosa."""
 
 import traceback
+from itertools import groupby
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import torf
 
 from . import api, config, db, filecompare, logger
-from .torrent_client import ClientTorrentInfo, TorrentClient, TorrentConflictError
+from .torrent_client import ClientTorrentInfo, TorrentClient, TorrentConflictError, TorrentState
 
 
 class NemorosaCore:
@@ -660,6 +661,130 @@ class NemorosaCore:
             self.logger.success("Failed downloads: %d", retry_stats["failed"])
             self.logger.success("Removed from undownloaded list: %d", retry_stats["removed"])
             self.logger.section("===== Retry Undownloaded Torrents Complete =====")
+
+    def post_process_injected_torrents(self):
+        """Post-process previously injected torrents to start downloading completed torrents.
+
+        This function checks previously found cross-seed matches in scan_results,
+        verifies if local torrents are 100% complete, and starts downloading the matched
+        torrents for cross-seeding. The matched torrents are already added to the client,
+        we just need to start downloading them when the local torrents reach 100% completion.
+        """
+        self.logger.section("===== Post-Processing Injected Torrents =====")
+
+        # Reset stats for injected torrents processing
+        stats = {
+            "matches_checked": 0,
+            "matches_completed": 0,
+            "matches_started_downloading": 0,
+            "matches_already_downloading": 0,
+            "matches_failed": 0,
+        }
+
+        try:
+            # Get all matched scan results
+            matched_results = self.database.get_matched_scan_results()
+            if not matched_results:
+                self.logger.debug("No matched torrents found")
+                return
+
+            self.logger.info(f"Found {len(matched_results)} matched torrents")
+
+            # Process all matched results
+            for matched_torrent_hash in matched_results:
+                stats["matches_checked"] += 1
+
+                self.logger.debug(f"Checking matched torrent: {matched_torrent_hash}")
+
+                # Check if matched torrent exists in client
+                matched_torrent = self.torrent_client.get_torrent_info(matched_torrent_hash)
+                if not matched_torrent:
+                    self.logger.debug(f"Matched torrent {matched_torrent_hash} not found in client, skipping")
+                    continue
+
+                # Skip if matched torrent is checking
+                if matched_torrent.state == TorrentState.CHECKING:
+                    self.logger.debug(f"Matched torrent {matched_torrent.name} is checking, skipping")
+                    continue
+
+                try:
+                    # If matched torrent is 100% complete, start downloading
+                    if matched_torrent.progress == 1.0:
+                        stats["matches_completed"] += 1
+                        self.logger.info(f"Matched torrent {matched_torrent.name} is 100% complete, starting download")
+
+                        # Check if matched torrent is already downloading
+                        if matched_torrent.progress > 0:
+                            stats["matches_already_downloading"] += 1
+                            self.logger.debug(f"Matched torrent {matched_torrent.name} is already downloading")
+                            continue
+
+                        # Start downloading the matched torrent
+                        self.logger.info(f"Starting download for matched torrent: {matched_torrent.name}")
+                        if self.torrent_client.resume_torrent(matched_torrent.id):
+                            stats["matches_started_downloading"] += 1
+                            self.logger.success(f"Started downloading matched torrent: {matched_torrent.name}")
+                        else:
+                            stats["matches_failed"] += 1
+                            self.logger.error(f"Failed to start downloading matched torrent: {matched_torrent.name}")
+
+                    # If matched torrent is not 100% complete, check file progress patterns
+                    else:
+                        self.logger.debug(
+                            f"Matched torrent {matched_torrent.name} not 100% complete "
+                            f"({matched_torrent.progress * 100:.1f}%), checking file patterns"
+                        )
+
+                        # Analyze file progress patterns
+                        if self._should_keep_partial_torrent(matched_torrent):
+                            self.logger.debug(f"Keeping partial torrent {matched_torrent.name} - valid pattern")
+                            continue
+                        else:
+                            self.logger.info(f"Removing failed match torrent {matched_torrent.name} - invalid pattern")
+                            self.torrent_client._remove_torrent(matched_torrent.id)
+                            stats["matches_failed"] += 1
+
+                except Exception as e:
+                    stats["matches_failed"] += 1
+                    self.logger.error(f"Error processing torrent {matched_torrent_hash}: {e}")
+
+        except Exception as e:
+            self.logger.error("Error processing injected torrents: %s", e)
+            self.logger.error(traceback.format_exc())
+        finally:
+            self.logger.success("Injected torrents post-processing summary:")
+            self.logger.success("Matches checked: %d", stats["matches_checked"])
+            self.logger.success("Matches completed: %d", stats["matches_completed"])
+            self.logger.success("Matches started downloading: %d", stats["matches_started_downloading"])
+            self.logger.success("Matches already downloading: %d", stats["matches_already_downloading"])
+            self.logger.success("Matches failed: %d", stats["matches_failed"])
+            self.logger.section("===== Injected Torrents Post-Processing Complete =====")
+
+    def _should_keep_partial_torrent(self, torrent: ClientTorrentInfo) -> bool:
+        """Check if a partial torrent should be kept based on piece and file progress patterns.
+
+        Compares the number of continuous undownloaded blocks with the number of files
+        that have zero progress. If there are more undownloaded blocks than zero-progress
+        files, it indicates a conflict.
+
+        Args:
+            torrent: The torrent to analyze.
+
+        Returns:
+            bool: True if torrent should be kept, False if it should be removed.
+        """
+        if not torrent.piece_progress or not torrent.files:
+            return False
+
+        # Count continuous blocks of undownloaded pieces (False values)
+        undownloaded_blocks_count = sum(1 for value, _ in groupby(torrent.piece_progress) if not value)
+
+        # Count continuous blocks of files with zero progress (completely undownloaded)
+        zero_progress_count = sum(1 for value, _ in groupby(torrent.files, key=lambda f: f.progress == 0.0) if value)
+
+        # Check for conflicts: number of continuous undownloaded blocks should not exceed
+        # the number of files with zero progress
+        return undownloaded_blocks_count <= zero_progress_count
 
     def process_single_torrent(
         self,

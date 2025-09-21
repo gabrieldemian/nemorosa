@@ -10,6 +10,7 @@ import os
 import posixpath
 import time
 from abc import ABC, abstractmethod
+from enum import Enum
 from urllib.parse import parse_qsl, urlparse
 
 import deluge_client
@@ -19,6 +20,76 @@ import torf
 import transmission_rpc
 
 from . import config, filecompare, logger
+
+
+class TorrentState(Enum):
+    """Torrent download state enumeration."""
+
+    UNKNOWN = "unknown"
+    DOWNLOADING = "downloading"
+    SEEDING = "seeding"
+    PAUSED = "paused"
+    STOPPED = "stopped"
+    COMPLETED = "completed"
+    CHECKING = "checking"
+    ERROR = "error"
+    QUEUED = "queued"
+    STALLED = "stalled"
+    MOVING = "moving"
+    ALLOCATING = "allocating"
+    METADATA_DOWNLOADING = "metadata_downloading"
+
+
+# State mapping tables for different torrent clients
+TRANSMISSION_STATE_MAPPING = {
+    0: TorrentState.STOPPED,  # TR_STATUS_STOPPED
+    1: TorrentState.QUEUED,  # TR_STATUS_CHECK_WAIT
+    2: TorrentState.CHECKING,  # TR_STATUS_CHECK
+    3: TorrentState.QUEUED,  # TR_STATUS_DOWNLOAD_WAIT
+    4: TorrentState.DOWNLOADING,  # TR_STATUS_DOWNLOAD
+    5: TorrentState.QUEUED,  # TR_STATUS_SEED_WAIT
+    6: TorrentState.SEEDING,  # TR_STATUS_SEED
+}
+
+QBITTORRENT_STATE_MAPPING = {
+    "error": TorrentState.ERROR,
+    "missingFiles": TorrentState.ERROR,
+    "uploading": TorrentState.SEEDING,
+    "pausedUP": TorrentState.PAUSED,
+    "stoppedUP": TorrentState.PAUSED,
+    "queuedUP": TorrentState.QUEUED,
+    "stalledUP": TorrentState.SEEDING,
+    "checkingUP": TorrentState.CHECKING,
+    "forcedUP": TorrentState.SEEDING,
+    "allocating": TorrentState.ALLOCATING,
+    "downloading": TorrentState.DOWNLOADING,
+    "metaDL": TorrentState.METADATA_DOWNLOADING,
+    "forcedMetaDL": TorrentState.METADATA_DOWNLOADING,
+    "pausedDL": TorrentState.PAUSED,
+    "stoppedDL": TorrentState.PAUSED,
+    "queuedDL": TorrentState.QUEUED,
+    "forcedDL": TorrentState.DOWNLOADING,
+    "stalledDL": TorrentState.DOWNLOADING,
+    "checkingDL": TorrentState.CHECKING,
+    "checkingResumeData": TorrentState.CHECKING,
+    "moving": TorrentState.MOVING,
+    "unknown": TorrentState.UNKNOWN,
+}
+
+DELUGE_STATE_MAPPING = {
+    "Error": TorrentState.ERROR,
+    "Paused": TorrentState.PAUSED,
+    "Queued": TorrentState.QUEUED,
+    "Checking": TorrentState.CHECKING,
+    "Downloading": TorrentState.DOWNLOADING,
+    "Downloading Metadata": TorrentState.METADATA_DOWNLOADING,
+    "Finished": TorrentState.COMPLETED,
+    "Seeding": TorrentState.SEEDING,
+    "Allocating": TorrentState.ALLOCATING,
+    "Moving": TorrentState.MOVING,
+    "Active": TorrentState.SEEDING,
+    "Inactive": TorrentState.PAUSED,
+}
 
 
 class TorrentConflictError(Exception):
@@ -32,20 +103,23 @@ class ClientTorrentFile(msgspec.Struct):
 
     name: str
     size: int
+    progress: float  # File download progress (0.0 to 1.0)
 
 
 class ClientTorrentInfo(msgspec.Struct):
     """Represents a torrent with all its information from torrent client."""
 
-    id: str | int
+    id: str
     name: str
     hash: str
-    percent_done: float
+    progress: float
     total_size: int
     files: list[ClientTorrentFile]
     trackers: list[str]
     download_dir: str
+    state: TorrentState = TorrentState.UNKNOWN  # Torrent state
     existing_target_trackers: list[str] = msgspec.field(default_factory=list)
+    piece_progress: list[bool] = msgspec.field(default_factory=list)  # Piece download status
 
     @property
     def fdict(self) -> dict[str, int]:
@@ -69,6 +143,18 @@ class TorrentClient(ABC):
 
         Returns:
             list[ClientTorrentInfo]: List of torrent information objects.
+        """
+        pass
+
+    @abstractmethod
+    def resume_torrent(self, torrent_id: str) -> bool:
+        """Resume downloading a torrent.
+
+        Args:
+            torrent_id (str): Torrent ID or hash.
+
+        Returns:
+            bool: True if successful, False otherwise.
         """
         pass
 
@@ -137,11 +223,12 @@ class TorrentClient(ABC):
                 id=target_torrent.id,
                 name=target_torrent.name,
                 hash=target_torrent.hash,
-                percent_done=target_torrent.percent_done,
+                progress=target_torrent.progress,
                 total_size=target_torrent.total_size,
                 files=target_torrent.files,
                 trackers=target_torrent.trackers,
                 download_dir=target_torrent.download_dir,
+                state=target_torrent.state,
                 existing_target_trackers=list(existing_trackers),
             )
 
@@ -172,7 +259,7 @@ class TorrentClient(ABC):
 
             # Step 1: Group by content name, collect which trackers each content exists on
             content_tracker_mapping = {}  # {content_name: set(trackers)}
-            valid_torrents = {}  # Torrents that meet basic conditions
+            valid_torrents: dict[str, ClientTorrentInfo] = {}  # Torrents that meet basic conditions
 
             for torrent in torrents:
                 # Only process torrents that meet CHECK_TRACKERS conditions
@@ -236,11 +323,12 @@ class TorrentClient(ABC):
                     id=torrent.id,
                     name=content_name,
                     hash=torrent.hash,
-                    percent_done=torrent.percent_done,
+                    progress=torrent.progress,
                     total_size=torrent.total_size,
                     files=torrent.files,
                     trackers=torrent.trackers,
                     download_dir=torrent.download_dir,
+                    state=torrent.state,
                     existing_target_trackers=list(existing_trackers),  # Record existing target trackers
                 )
 
@@ -291,7 +379,7 @@ class TorrentClient(ABC):
                     raise TorrentConflictError(error_msg)
 
                 # Get current torrent name
-                current_name = self._get_torrent_name(torrent_id)
+                current_name = self.get_torrent_info(torrent_id).name
 
                 # Rename entire torrent
                 if current_name != local_torrent_name:
@@ -349,7 +437,7 @@ class TorrentClient(ABC):
     # ===== The following methods need to be implemented by derived classes =====
 
     @abstractmethod
-    def _add_torrent(self, torrent_data, download_dir: str, hash_match: bool) -> str | int:
+    def _add_torrent(self, torrent_data, download_dir: str, hash_match: bool) -> str:
         """Add torrent to client, return torrent ID.
 
         Args:
@@ -358,68 +446,68 @@ class TorrentClient(ABC):
             hash_match (bool): Whether this is a hash match, if True, skip verification.
 
         Returns:
-            str | int: Torrent ID.
+            str: Torrent ID.
         """
         pass
 
     @abstractmethod
-    def _remove_torrent(self, torrent_id: str | int):
+    def _remove_torrent(self, torrent_id: str):
         """Remove torrent from client.
 
         Args:
-            torrent_id (str | int): Torrent ID.
+            torrent_id (str): Torrent ID.
         """
         pass
 
     @abstractmethod
-    def _get_torrent_name(self, torrent_id: str | int) -> str:
-        """Get torrent name.
+    def get_torrent_info(self, torrent_id: str) -> ClientTorrentInfo | None:
+        """Get torrent information.
 
         Args:
-            torrent_id (str | int): Torrent ID.
+            torrent_id (str): Torrent ID.
 
         Returns:
-            str: Torrent name.
+            ClientTorrentInfo | None: Torrent information object, or None if not found.
         """
         pass
 
     @abstractmethod
-    def _rename_torrent(self, torrent_id: str | int, old_name: str, new_name: str):
+    def _rename_torrent(self, torrent_id: str, old_name: str, new_name: str):
         """Rename entire torrent.
 
         Args:
-            torrent_id (str | int): Torrent ID.
+            torrent_id (str): Torrent ID.
             old_name (str): Old torrent name.
             new_name (str): New torrent name.
         """
         pass
 
     @abstractmethod
-    def _rename_file(self, torrent_id: str | int, old_path: str, new_name: str):
+    def _rename_file(self, torrent_id: str, old_path: str, new_name: str):
         """Rename file within torrent.
 
         Args:
-            torrent_id (str | int): Torrent ID.
+            torrent_id (str): Torrent ID.
             old_path (str): Old file path.
             new_name (str): New file name.
         """
         pass
 
     @abstractmethod
-    def _verify_torrent(self, torrent_id: str | int):
+    def _verify_torrent(self, torrent_id: str):
         """Verify torrent integrity.
 
         Args:
-            torrent_id (str | int): Torrent ID.
+            torrent_id (str): Torrent ID.
         """
         pass
 
     @abstractmethod
-    def _has_target_tracker(self, torrent_id: str | int, target_tracker: str) -> bool:
+    def _has_target_tracker(self, torrent_id: str, target_tracker: str) -> bool:
         """Check if torrent contains target tracker.
 
         Args:
-            torrent_id (str | int): Torrent ID.
+            torrent_id (str): Torrent ID.
             target_tracker (str): Target tracker URL.
 
         Returns:
@@ -428,11 +516,11 @@ class TorrentClient(ABC):
         pass
 
     @abstractmethod
-    def _process_rename_map(self, torrent_id: str | int, base_path: str, rename_map: dict) -> dict:
+    def _process_rename_map(self, torrent_id: str, base_path: str, rename_map: dict) -> dict:
         """Process rename mapping to adapt to specific torrent client.
 
         Args:
-            torrent_id (str | int): Torrent ID.
+            torrent_id (str): Torrent ID.
             base_path (str): Base path for files.
             rename_map (dict): Original rename mapping.
 
@@ -479,7 +567,7 @@ class TorrentClient(ABC):
             torrent_id = matched_torrent.id
             try:
                 # Get current torrent name
-                current_name = self._get_torrent_name(torrent_id)
+                current_name = self.get_torrent_info(torrent_id).name
 
                 # Rename entire torrent
                 if current_name != new_name:
@@ -557,14 +645,23 @@ class TransmissionClient(TorrentClient):
             for torrent in torrents:
                 result.append(
                     ClientTorrentInfo(
-                        id=torrent.id,
+                        id=str(torrent.id),
                         name=torrent.name,
                         hash=torrent.hash_string,
-                        percent_done=torrent.percent_done,
+                        progress=torrent.percent_done,
                         total_size=torrent.total_size,
-                        files=[ClientTorrentFile(name=f["name"], size=f["length"]) for f in torrent.fields["files"]],
+                        files=[
+                            ClientTorrentFile(
+                                name=f["name"],
+                                size=f["length"],
+                                progress=f.get("bytesCompleted", 0) / f["length"] if f["length"] > 0 else 0.0,
+                            )
+                            for f in torrent.fields["files"]
+                        ],
                         trackers=torrent.tracker_list,
                         download_dir=torrent.download_dir,
+                        state=TRANSMISSION_STATE_MAPPING.get(torrent.status, TorrentState.UNKNOWN),
+                        piece_progress=torrent.pieces or [],
                     )
                 )
 
@@ -575,7 +672,7 @@ class TransmissionClient(TorrentClient):
                 self.logger.error("Error retrieving torrents from Transmission: %s", e)
             return []
 
-    def _add_torrent(self, torrent_data, download_dir: str, hash_match: bool) -> int:
+    def _add_torrent(self, torrent_data, download_dir: str, hash_match: bool) -> str:
         """Add torrent to Transmission.
 
         Args:
@@ -589,9 +686,9 @@ class TransmissionClient(TorrentClient):
         added_torrent = self.client.add_torrent(
             torrent_data, download_dir=download_dir, paused=True, labels=[config.cfg.downloader.label]
         )
-        return added_torrent.id
+        return str(added_torrent.id)
 
-    def _remove_torrent(self, torrent_id: int):
+    def _remove_torrent(self, torrent_id: str):
         """Remove torrent from Transmission.
 
         Args:
@@ -599,28 +696,62 @@ class TransmissionClient(TorrentClient):
         """
         self.client.remove_torrent(torrent_id, delete_data=False)
 
-    def _get_torrent_name(self, torrent_id: int) -> str:
-        """Get torrent name."""
-        return self.client.get_torrent(torrent_id).name
+    def get_torrent_info(self, torrent_id: str) -> ClientTorrentInfo | None:
+        """Get torrent information."""
+        try:
+            torrent = self.client.get_torrent(torrent_id)
+            return ClientTorrentInfo(
+                id=str(torrent.id),
+                name=torrent.name,
+                hash=torrent.hash_string,
+                progress=torrent.percent_done,
+                total_size=torrent.total_size,
+                files=[
+                    ClientTorrentFile(
+                        name=f["name"],
+                        size=f["length"],
+                        progress=f.get("bytesCompleted", 0) / f["length"] if f["length"] > 0 else 0.0,
+                    )
+                    for f in torrent.fields["files"]
+                ],
+                trackers=torrent.tracker_list,
+                download_dir=torrent.download_dir,
+                state=TRANSMISSION_STATE_MAPPING.get(torrent.status, TorrentState.UNKNOWN),
+                piece_progress=torrent.pieces or [],
+            )
+        except Exception as e:
+            if self.logger:
+                self.logger.error("Error retrieving torrent info from Transmission: %s", e)
+            return None
 
-    def _rename_torrent(self, torrent_id: int, old_name: str, new_name: str):
+    def _rename_torrent(self, torrent_id: str, old_name: str, new_name: str):
         """Rename entire torrent."""
         self.client.rename_torrent_path(torrent_id, location=old_name, name=new_name)
 
-    def _rename_file(self, torrent_id: int, old_path: str, new_name: str):
+    def _rename_file(self, torrent_id: str, old_path: str, new_name: str):
         """Rename file within torrent."""
         self.client.rename_torrent_path(torrent_id, location=old_path, name=new_name)
 
-    def _verify_torrent(self, torrent_id: int):
+    def _verify_torrent(self, torrent_id: str):
         """Verify torrent integrity."""
         self.client.verify_torrent(torrent_id)
 
-    def _has_target_tracker(self, torrent_id: int, target_tracker: str) -> bool:
+    def _has_target_tracker(self, torrent_id: str, target_tracker: str) -> bool:
         """Check if torrent contains target tracker."""
         torrent = self.client.get_torrent(torrent_id)
         return any(target_tracker in url for url in torrent.tracker_list)
 
-    def _process_rename_map(self, torrent_id: int, base_path: str, rename_map: dict) -> dict:
+    def resume_torrent(self, torrent_id: str) -> bool:
+        """Resume downloading a torrent in Transmission."""
+        try:
+            self.client.start_torrent(torrent_id)
+            return True
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Failed to resume torrent {torrent_id}: {e}")
+            return False
+
+    def _process_rename_map(self, torrent_id: str, base_path: str, rename_map: dict) -> dict:
         """Process rename mapping to adapt to Transmission."""
         transmission_map = {}
         temp_map = {}
@@ -671,10 +802,8 @@ class QBittorrentClient(TorrentClient):
             result = []
 
             for torrent in torrents:
-                # Get torrent files
-                files = self.client.torrents_files(torrent_hash=torrent.hash)
-                # Get torrent trackers
-                trackers = self.client.torrents_trackers(torrent_hash=torrent.hash)
+                files = torrent.files
+                trackers = torrent.trackers
                 # Remove special virtual trackers from tracker_urls
                 tracker_urls = [
                     tracker.url
@@ -687,11 +816,13 @@ class QBittorrentClient(TorrentClient):
                         id=torrent.hash,
                         name=torrent.name,
                         hash=torrent.hash,
-                        percent_done=torrent.progress,
+                        progress=torrent.progress,
                         total_size=torrent.size,
-                        files=[ClientTorrentFile(name=f.name, size=f.size) for f in files],
+                        files=[ClientTorrentFile(name=f.name, size=f.size, progress=f.progress) for f in files],
                         trackers=tracker_urls,
                         download_dir=torrent.save_path,
+                        state=QBITTORRENT_STATE_MAPPING.get(torrent.state, TorrentState.UNKNOWN),
+                        piece_progress=[piece == 2 for piece in torrent.pieceStates] if torrent.pieceStates else [],
                     )
                 )
 
@@ -721,12 +852,37 @@ class QBittorrentClient(TorrentClient):
         """Remove torrent from qBittorrent."""
         self.client.torrents_delete(torrent_hashes=torrent_id, delete_files=False)
 
-    def _get_torrent_name(self, torrent_id: str) -> str:
-        """Get torrent name."""
-        torrent_info = self.client.torrents_info(torrent_hashes=torrent_id)
-        if torrent_info:
-            return torrent_info[0].name
-        return ""
+    def get_torrent_info(self, torrent_id: str) -> ClientTorrentInfo | None:
+        """Get torrent information."""
+        try:
+            torrent_info = self.client.torrents_info(torrent_hashes=torrent_id)
+            if not torrent_info:
+                return None
+
+            torrent = torrent_info[0]
+            files = torrent.files
+            trackers = torrent.trackers
+            # Remove special virtual trackers from tracker_urls
+            tracker_urls = [
+                tracker.url for tracker in trackers if tracker.url not in ("** [DHT] **", "** [PeX] **", "** [LSD] **")
+            ]
+
+            return ClientTorrentInfo(
+                id=torrent.hash,
+                name=torrent.name,
+                hash=torrent.hash,
+                progress=torrent.progress,
+                total_size=torrent.size,
+                files=[ClientTorrentFile(name=f.name, size=f.size, progress=f.progress) for f in files],
+                trackers=tracker_urls,
+                download_dir=torrent.save_path,
+                state=QBITTORRENT_STATE_MAPPING.get(torrent.state, TorrentState.UNKNOWN),
+                piece_progress=[piece == 2 for piece in torrent.pieceStates] if torrent.pieceStates else [],
+            )
+        except Exception as e:
+            if self.logger:
+                self.logger.error("Error retrieving torrent info from qBittorrent: %s", e)
+            return None
 
     def _rename_torrent(self, torrent_id: str, old_name: str, new_name: str):
         """Rename entire torrent."""
@@ -746,6 +902,16 @@ class QBittorrentClient(TorrentClient):
         trackers = self.client.torrents_trackers(torrent_hash=torrent_id)
         tracker_urls = [tracker.url for tracker in trackers]
         return any(target_tracker in url for url in tracker_urls)
+
+    def resume_torrent(self, torrent_id: str) -> bool:
+        """Resume downloading a torrent in qBittorrent."""
+        try:
+            self.client.torrents_resume(torrent_hashes=torrent_id)
+            return True
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Failed to resume torrent {torrent_id}: {e}")
+            return False
 
     def _process_rename_map(self, torrent_id: str, base_path: str, rename_map: dict) -> dict:
         """
@@ -796,11 +962,16 @@ class DelugeClient(TorrentClient):
                         id=torrent_id,
                         name=torrent_info["name"],
                         hash=torrent_info["hash"],
-                        percent_done=torrent_info["progress"] / 100.0,
+                        progress=torrent_info["progress"] / 100.0,
                         total_size=torrent_info["total_size"],
-                        files=[ClientTorrentFile(name=f["path"], size=f["size"]) for f in torrent_info["files"]],
+                        files=[
+                            ClientTorrentFile(name=f["path"], size=f["size"], progress=f.get("progress", 0.0) / 100.0)
+                            for f in torrent_info["files"]
+                        ],
                         trackers=[t["url"] for t in torrent_info["trackers"]],
                         download_dir=torrent_info["save_path"],
+                        state=DELUGE_STATE_MAPPING.get(torrent_info["state"], TorrentState.UNKNOWN),
+                        piece_progress=torrent_info.get("pieces", []),
                     )
                 )
 
@@ -852,10 +1023,34 @@ class DelugeClient(TorrentClient):
         """Remove torrent from Deluge."""
         self.client.call("core.remove_torrent", torrent_id, False)
 
-    def _get_torrent_name(self, torrent_id: str) -> str:
-        """Get torrent name."""
-        torrent_info = self.client.call("core.get_torrent_status", torrent_id, ["name"])
-        return torrent_info["name"]
+    def get_torrent_info(self, torrent_id: str) -> ClientTorrentInfo | None:
+        """Get torrent information."""
+        try:
+            torrent_info = self.client.call(
+                "core.get_torrent_status",
+                torrent_id,
+                ["name", "hash", "progress", "total_size", "files", "trackers", "save_path", "pieces"],
+            )
+
+            return ClientTorrentInfo(
+                id=torrent_id,
+                name=torrent_info["name"],
+                hash=torrent_info["hash"],
+                progress=torrent_info["progress"] / 100.0,
+                total_size=torrent_info["total_size"],
+                files=[
+                    ClientTorrentFile(name=f["path"], size=f["size"], progress=f.get("progress", 0.0) / 100.0)
+                    for f in torrent_info["files"]
+                ],
+                trackers=[t["url"] for t in torrent_info["trackers"]],
+                download_dir=torrent_info["save_path"],
+                state=DELUGE_STATE_MAPPING.get(torrent_info["state"], TorrentState.UNKNOWN),
+                piece_progress=torrent_info.get("pieces", []),
+            )
+        except Exception as e:
+            if self.logger:
+                self.logger.error("Error retrieving torrent info from Deluge: %s", e)
+            return None
 
     def _rename_torrent(self, torrent_id: str, old_name: str, new_name: str):
         """Rename entire torrent."""
@@ -878,6 +1073,16 @@ class DelugeClient(TorrentClient):
         torrent_info = self.client.call("core.get_torrent_status", torrent_id, ["trackers"])
         tracker_urls = [tracker["url"] for tracker in torrent_info["trackers"]]
         return any(target_tracker in url for url in tracker_urls)
+
+    def resume_torrent(self, torrent_id: str) -> bool:
+        """Resume downloading a torrent in Deluge."""
+        try:
+            self.client.call("core.resume_torrent", [torrent_id])
+            return True
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Failed to resume torrent {torrent_id}: {e}")
+            return False
 
     def _process_rename_map(self, torrent_id: str, base_path: str, rename_map: dict) -> dict:
         """

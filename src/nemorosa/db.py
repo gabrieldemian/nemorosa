@@ -220,6 +220,27 @@ class TorrentDatabase:
                 (torrent_id, site_host),
             )
 
+    def get_matched_scan_results(self) -> dict[str, dict[str, Any]]:
+        """Get scan results with matched torrent hash for all sites.
+
+        Returns:
+            dict[str, dict[str, Any]]: Dictionary mapping matched_torrent_hash to scan result information.
+        """
+        with self.connection as conn:
+            cursor = conn.execute(
+                "SELECT local_torrent_hash, local_torrent_name, matched_torrent_id, matched_torrent_hash, site_host "
+                "FROM scan_results WHERE matched_torrent_hash IS NOT NULL"
+            )
+            result = {}
+            for row in cursor.fetchall():
+                result[row["matched_torrent_hash"]] = {
+                    "local_torrent_hash": row["local_torrent_hash"],
+                    "local_torrent_name": row["local_torrent_name"],
+                    "matched_torrent_id": row["matched_torrent_id"],
+                    "site_host": row["site_host"],
+                }
+            return result
+
     # ================== Job log related methods ==================
 
     def get_job_last_run(self, job_name: str) -> int | None:
