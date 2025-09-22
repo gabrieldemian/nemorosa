@@ -105,9 +105,6 @@ class TorrentDatabase:
 
             # Create indexes to improve query performance
             conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_scan_results_local_torrent_hash ON scan_results(local_torrent_hash)"
-            )
-            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_scan_results_matched_checked "
                 "ON scan_results(matched_torrent_hash, checked)"
             )
@@ -140,18 +137,20 @@ class TorrentDatabase:
                 (local_torrent_hash, local_torrent_name, matched_torrent_id, site_host, matched_torrent_hash),
             )
 
-    def is_hash_scanned(self, local_torrent_hash: str) -> bool:
-        """Check if specified local torrent hash has been scanned on any site.
+    def is_hash_scanned(self, local_torrent_hash: str, site_host: str) -> bool:
+        """Check if specified local torrent hash has been scanned on specific site.
 
         Args:
             local_torrent_hash (str): Local torrent hash.
+            site_host (str): Site hostname.
 
         Returns:
-            bool: True if scanned on any site, False otherwise.
+            bool: True if scanned on the specific site, False otherwise.
         """
         with self.connection as conn:
             cursor = conn.execute(
-                "SELECT 1 FROM scan_results WHERE local_torrent_hash = ? LIMIT 1", (local_torrent_hash,)
+                "SELECT 1 FROM scan_results WHERE local_torrent_hash = ? AND site_host = ? LIMIT 1",
+                (local_torrent_hash, site_host),
             )
             return cursor.fetchone() is not None
 

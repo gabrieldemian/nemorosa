@@ -83,18 +83,15 @@ class GazelleBase:
         return torrent_object
 
     def _get_torrent_data(self, torrent_id):
-        """Get torrent data - subclasses must implement.
+        """Get torrent data using the Gazelle API.
 
         Args:
             torrent_id: The ID of the torrent to retrieve.
 
         Returns:
             dict: Response data from the API.
-
-        Raises:
-            NotImplementedError: Always raised for base class.
         """
-        raise NotImplementedError("Subclasses must implement _get_torrent_data")
+        return self.ajax("torrent", id=torrent_id)
 
     def parse_file_list(self, file_list_str):
         """Parse the file list from a torrent object.
@@ -213,18 +210,31 @@ class GazelleBase:
         raise NotImplementedError("Subclasses must implement search_torrent_by_filename")
 
     def search_torrent_by_hash(self, torrent_hash):
-        """Search torrent by hash - subclasses must implement specific logic.
+        """Search torrent by hash using the Gazelle API.
 
         Args:
             torrent_hash (str): Torrent hash to search for.
 
         Returns:
             dict: Search result with torrent information, or None if not found.
-
-        Raises:
-            NotImplementedError: Always raised for base class.
         """
-        raise NotImplementedError("Subclasses must implement search_torrent_by_hash")
+        try:
+            response = self.ajax("torrent", hash=torrent_hash)
+            if response.get("status") == "success":
+                self.logger.debug(f"Hash search successful for hash '{torrent_hash}'")
+                return response
+            else:
+                if response.get("error") in ["bad parameters", "bad hash parameter"]:
+                    self.logger.debug(f"No torrent found matching hash '{torrent_hash}'")
+                    return None
+                else:
+                    self.logger.error(f"Error searching for torrent by hash '{torrent_hash}': {response.get('error')}")
+                    raise RequestException(
+                        f"Error searching for torrent by hash '{torrent_hash}': {response.get('error')}"
+                    )
+        except Exception as e:
+            self.logger.error(f"Error searching for torrent by hash '{torrent_hash}': {e}")
+            raise
 
     def ajax(self, action, **kwargs):
         """Make an AJAX request at a given action page.
@@ -315,17 +325,6 @@ class GazelleJSONAPI(GazelleBase):
         params = {"auth": self.authkey}
         self.session.get(logoutpage, params=params, allow_redirects=False)
 
-    def _get_torrent_data(self, torrent_id):
-        """Implement the base class abstract method.
-
-        Args:
-            torrent_id: The ID of the torrent to retrieve.
-
-        Returns:
-            dict: Response data from the torrent API.
-        """
-        return self.ajax("torrent", id=torrent_id)
-
     def search_torrent_by_filename(self, filename):
         params = {"filelist": filename}
         try:
@@ -346,28 +345,7 @@ class GazelleJSONAPI(GazelleBase):
             return torrents
         except Exception as e:
             self.logger.error(f"Error searching for torrent by filename '{filename}': {e}")
-            return []
-
-    def search_torrent_by_hash(self, torrent_hash):
-        """Search torrent by hash using the torrent API.
-
-        Args:
-            torrent_hash (str): Torrent hash to search for.
-
-        Returns:
-            dict: Search result with torrent information, or None if not found.
-        """
-        try:
-            response = self.ajax("torrent", hash=torrent_hash)
-            if response.get("status") == "success":
-                self.logger.debug(f"Hash search successful for hash '{torrent_hash}'")
-                return response
-            else:
-                self.logger.debug(f"No torrent found matching hash '{torrent_hash}'")
-                return None
-        except Exception as e:
-            self.logger.error(f"Error searching for torrent by hash '{torrent_hash}': {e}")
-            return None
+            raise
 
     def _download_torrent_response(self, torrent_id):
         """Implement the base class abstract method - get download torrent response.
@@ -420,27 +398,6 @@ class GazelleParser(GazelleBase):
 
         response = self.request("torrents.php", params=params)
         return self.parse_search_results(response.text)
-
-    def search_torrent_by_hash(self, torrent_hash):
-        """Search torrent by hash using the torrent API.
-
-        Args:
-            torrent_hash (str): Torrent hash to search for.
-
-        Returns:
-            dict: Search result with torrent information, or None if not found.
-        """
-        try:
-            response = self.ajax("torrent", hash=torrent_hash)
-            if response.get("status") == "success":
-                self.logger.debug(f"Hash search successful for hash '{torrent_hash}'")
-                return response
-            else:
-                self.logger.debug(f"No torrent found matching hash '{torrent_hash}'")
-                return None
-        except Exception as e:
-            self.logger.error(f"Error searching for torrent by hash '{torrent_hash}': {e}")
-            return None
 
     def parse_search_results(self, html):
         """Parse search results page.
@@ -522,17 +479,6 @@ class GazelleParser(GazelleBase):
         except Exception as e:
             self.logger.error(f"Error parsing torrent row: {e}")
             return None
-
-    def _get_torrent_data(self, torrent_id):
-        """Implement the base class abstract method.
-
-        Args:
-            torrent_id: The ID of the torrent to retrieve.
-
-        Returns:
-            dict: Response data from the torrent API.
-        """
-        return self.ajax("torrent", id=torrent_id)
 
     def _download_torrent_response(self, torrent_id):
         """Implement the base class abstract method - get download torrent response.

@@ -46,44 +46,41 @@ class NemorosaCore:
             int | None: Torrent ID if found, None otherwise.
         """
         self.logger.debug("Trying hash-based search first")
-        try:
-            # Get target source flag from API
-            target_source_flag = api.source_flag
 
-            source_flags = [target_source_flag, ""]
+        # Get target source flag from API
+        target_source_flag = api.source_flag
 
-            # Define possible source flags for the target tracker
-            # This should match the logic in fertilizer
-            if target_source_flag == "RED":
-                source_flags.append("PTH")
-            elif target_source_flag == "OPS":
-                source_flags.append("APL")
+        source_flags = [target_source_flag, ""]
 
-            # Create a copy of the torrent and try different source flags
-            for flag in source_flags:
-                try:
-                    torrent_object.source = flag
+        # Define possible source flags for the target tracker
+        # This should match the logic in fertilizer
+        if target_source_flag == "RED":
+            source_flags.append("PTH")
+        elif target_source_flag == "OPS":
+            source_flags.append("APL")
 
-                    # Calculate hash
-                    torrent_hash = torrent_object.infohash
+        # Create a copy of the torrent and try different source flags
+        for flag in source_flags:
+            try:
+                torrent_object.source = flag
 
-                    # Search torrent by hash
-                    search_result = api.search_torrent_by_hash(torrent_hash)
-                    if search_result:
-                        self.logger.success(f"Found torrent by hash! Hash: {torrent_hash}")
+                # Calculate hash
+                torrent_hash = torrent_object.infohash
 
-                        # Get torrent ID from search result
-                        torrent_id = search_result["response"]["torrent"]["id"]
-                        if torrent_id:
-                            tid = int(torrent_id)
-                            self.logger.success(f"Found match! Torrent ID: {tid}")
-                            return tid
-                except Exception as e:
-                    self.logger.debug(f"Error calculating hash for source '{flag}': {e}")
-                    continue
+                # Search torrent by hash
+                search_result = api.search_torrent_by_hash(torrent_hash)
+                if search_result:
+                    self.logger.success(f"Found torrent by hash! Hash: {torrent_hash}")
 
-        except Exception as e:
-            self.logger.debug(f"Hash search failed: {e}")
+                    # Get torrent ID from search result
+                    torrent_id = search_result["response"]["torrent"]["id"]
+                    if torrent_id:
+                        tid = int(torrent_id)
+                        self.logger.success(f"Found match! Torrent ID: {tid}")
+                        return tid
+            except Exception as e:
+                self.logger.debug(f"Hash search failed for source '{flag}': {e}")
+                raise
 
         return None
 
@@ -122,7 +119,7 @@ class NemorosaCore:
                 torrents = api.search_torrent_by_filename(fname_query)
             except Exception as e:
                 self.logger.error(f"Error searching for file '{fname_query}': {e}")
-                continue
+                raise
 
             # Record the number of results found
             self.logger.debug(f"Found {len(torrents)} potential matches for file '{fname_query}'")
@@ -145,6 +142,7 @@ class NemorosaCore:
                             self.logger.debug(f"Fallback search also found no results for '{fname_query}'")
                     except Exception as e:
                         self.logger.error(f"Error in fallback search for file basename '{fname_query}': {e}")
+                        raise
 
             # Match by total size
             size_match_found = False
@@ -384,27 +382,39 @@ class NemorosaCore:
         # Get site hostname
         site_host = urlparse(api.server).netloc
 
+        # Track if any search method failed with an error
+        search_error_occurred = False
+
         # Try hash-based search first if torrent object is available
         if torrent_object:
-            tid = self.hash_based_search(torrent_object=torrent_object, api=api)
+            try:
+                tid = self.hash_based_search(torrent_object=torrent_object, api=api)
+            except Exception as e:
+                self.logger.error(f"Hash-based search failed: {e}")
+                search_error_occurred = True
 
         # If hash search didn't find anything, try filename search
         if tid is None:
-            tid = self.filename_search(fdict=torrent_details.fdict, tsize=torrent_details.total_size, api=api)
-            hash_match = False
+            try:
+                tid = self.filename_search(fdict=torrent_details.fdict, tsize=torrent_details.total_size, api=api)
+                hash_match = False
+            except Exception as e:
+                self.logger.error(f"Filename search failed: {e}")
+                search_error_occurred = True
 
         # Handle no match found case
         if tid is None:
             self.logger.header("No matching torrent found")
 
             # Record scan result: no matching torrent found
-            self.database.add_scan_result(
-                local_torrent_hash=torrent_details.hash,
-                local_torrent_name=torrent_details.name,
-                matched_torrent_id=None,
-                site_host=site_host,
-                matched_torrent_hash=None,
-            )
+            if not search_error_occurred:
+                self.database.add_scan_result(
+                    local_torrent_hash=torrent_details.hash,
+                    local_torrent_name=torrent_details.name,
+                    matched_torrent_id=None,
+                    site_host=site_host,
+                    matched_torrent_hash=None,
+                )
             return None, False
 
         # Found a match
@@ -498,15 +508,6 @@ class NemorosaCore:
             bool: True if any target site was successful, False otherwise.
         """
 
-        # Check if torrent has been scanned
-        if self.database.is_hash_scanned(local_torrent_hash=torrent_details.hash):
-            self.logger.debug(
-                "Skipping already scanned torrent: %s (%s)",
-                torrent_details.name,
-                torrent_details.hash,
-            )
-            return False
-
         # Try to get torrent data from torrent client for hash search
         torrent_object = self.torrent_client.get_torrent_object(torrent_details.hash)
 
@@ -515,6 +516,18 @@ class NemorosaCore:
         existing_target_trackers = set(torrent_details.existing_target_trackers)
 
         for api_instance in api.get_target_apis():
+            # Get site hostname for this API instance
+            site_host = urlparse(api_instance.server).netloc
+
+            # Check if torrent has been scanned on this specific site
+            if self.database.is_hash_scanned(local_torrent_hash=torrent_details.hash, site_host=site_host):
+                self.logger.debug(
+                    "Skipping already scanned torrent on %s: %s (%s)",
+                    site_host,
+                    torrent_details.name,
+                    torrent_details.hash,
+                )
+                continue
             self.logger.debug(f"Trying target site: {api_instance.server} (tracker: {api_instance.tracker_query})")
 
             # Check if this content already exists on current target tracker
@@ -802,15 +815,6 @@ class NemorosaCore:
                     "infohash": infohash,
                 }
 
-            # Check if torrent has been scanned
-            if self.database.is_hash_scanned(local_torrent_hash=infohash):
-                return {
-                    "status": "skipped",
-                    "message": f"Torrent {infohash} already scanned",
-                    "infohash": infohash,
-                    "torrent_name": torrent_info.name,
-                }
-
             # Check if torrent already exists on all target trackers
             existing_trackers = set(torrent_info.existing_target_trackers)
             target_tracker_set = set(target_trackers)
@@ -936,7 +940,8 @@ class NemorosaCore:
 
             # Record scan result: matching torrent found
             self.database.add_scan_result(
-                local_torrent_hash=matched_torrent.hash,
+                # Reverse scan matches should not affect subsequent forward matching
+                local_torrent_hash=f"reverse_{matched_torrent.hash}",
                 local_torrent_name=matched_torrent.name,
                 matched_torrent_id=str(tid),
                 site_host=site_host,

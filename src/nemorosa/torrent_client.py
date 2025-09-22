@@ -6,8 +6,10 @@ Transmission, qBittorrent, and Deluge.
 """
 
 import base64
+import json
 import os
 import posixpath
+import re
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -19,6 +21,7 @@ import msgspec
 import qbittorrentapi
 import torf
 import transmission_rpc
+from transmission_rpc.constants import RpcMethod
 
 from . import config, filecompare, logger
 
@@ -43,13 +46,13 @@ class TorrentState(Enum):
 
 # State mapping tables for different torrent clients
 TRANSMISSION_STATE_MAPPING = {
-    0: TorrentState.STOPPED,  # TR_STATUS_STOPPED
-    1: TorrentState.QUEUED,  # TR_STATUS_CHECK_WAIT
-    2: TorrentState.CHECKING,  # TR_STATUS_CHECK
-    3: TorrentState.QUEUED,  # TR_STATUS_DOWNLOAD_WAIT
-    4: TorrentState.DOWNLOADING,  # TR_STATUS_DOWNLOAD
-    5: TorrentState.QUEUED,  # TR_STATUS_SEED_WAIT
-    6: TorrentState.SEEDING,  # TR_STATUS_SEED
+    "stopped": TorrentState.STOPPED,
+    "check pending": TorrentState.CHECKING,
+    "checking": TorrentState.CHECKING,
+    "download pending": TorrentState.QUEUED,
+    "downloading": TorrentState.DOWNLOADING,
+    "seed pending": TorrentState.QUEUED,
+    "seeding": TorrentState.SEEDING,
 }
 
 QBITTORRENT_STATE_MAPPING = {
@@ -371,30 +374,24 @@ class TorrentClient(ABC):
         # Flag to track if rename map has been processed
         rename_map_processed = False
 
+        # Add torrent to client
+        try:
+            torrent_id = self._add_torrent(torrent_data, download_dir, hash_match)
+        except TorrentConflictError as e:
+            self.logger.error(f"Torrent injection failed due to conflict: {e}")
+            self.logger.error(
+                "This usually happens because the source flag of the torrent to be injected is incorrect, "
+                "which generally occurs on trackers that do not enforce source flag requirements."
+            )
+            raise
+
         max_retries = 8
         for attempt in range(max_retries):
             try:
-                # Add torrent to client
-                torrent_id = self._add_torrent(torrent_data, download_dir, hash_match)
-
-                # Check if tracker is correctly added
-                torrent_obj = torf.Torrent.read_stream(torrent_data)
-                target_tracker = torrent_obj.trackers.flat[0] if torrent_obj.trackers else ""
-                if not self._has_target_tracker(torrent_id, target_tracker):
-                    error_msg = (
-                        f"The torrent to be injected cannot coexist with local torrent {torrent_obj.infohash}. "
-                        "This usually happens because the source flag of the torrent to be injected is incorrect, "
-                        "which generally occurs on trackers that do not enforce source flag requirements."
-                    )
-                    self.logger.error(error_msg)
-                    raise TorrentConflictError(error_msg)
-
                 # Get current torrent name
-                torrent_info = self.get_torrent_info(torrent_id)
-                if torrent_info is None:
-                    self.logger.error(f"Failed to get torrent info for {torrent_id}")
-                    return False
-                current_name = torrent_info.name
+                current_name = self._get_torrent_name(torrent_id)
+                if not current_name:
+                    raise ValueError(f"Failed to get torrent name for {torrent_id}")
 
                 # Rename entire torrent
                 if current_name != local_torrent_name:
@@ -431,9 +428,6 @@ class TorrentClient(ABC):
 
                 self.logger.success("Torrent injected successfully")
                 return True
-            except TorrentConflictError as e:
-                self.logger.error(f"Torrent injection failed due to conflict: {e}")
-                raise
             except Exception as e:
                 if attempt < max_retries - 1:
                     self.logger.debug(f"Error injecting torrent: {e}, retrying ({attempt + 1}/{max_retries})...")
@@ -514,15 +508,14 @@ class TorrentClient(ABC):
         pass
 
     @abstractmethod
-    def _has_target_tracker(self, torrent_id: str, target_tracker: str) -> bool:
-        """Check if torrent contains target tracker.
+    def _get_torrent_name(self, torrent_id: str) -> str:
+        """Get torrent name by ID.
 
         Args:
             torrent_id (str): Torrent ID.
-            target_tracker (str): Target tracker URL.
 
         Returns:
-            bool: True if torrent contains target tracker.
+            str: Torrent name.
         """
         pass
 
@@ -642,6 +635,30 @@ class TransmissionClient(TorrentClient):
             password=config.password,
         )
 
+    def _decode_piece_progress(self, pieces_b64: str, piece_count: int) -> list[bool]:
+        """Decode base64 pieces data to get piece download status.
+
+        Args:
+            pieces_b64: Base64 encoded pieces data from Transmission
+            piece_count: Total number of pieces in the torrent
+
+        Returns:
+            List of boolean values indicating piece download status
+        """
+        pieces_data = base64.b64decode(pieces_b64)
+        piece_progress = [False] * piece_count
+
+        for byte_index in range(min(len(pieces_data), (piece_count + 7) // 8)):
+            byte_value = pieces_data[byte_index]
+            start_piece = byte_index * 8
+            end_piece = min(start_piece + 8, piece_count)
+
+            for bit_offset in range(end_piece - start_piece):
+                bit_index = 7 - bit_offset
+                piece_progress[start_piece + bit_offset] = bool(byte_value & (1 << bit_index))
+
+        return piece_progress
+
     def get_torrents(self) -> list[ClientTorrentInfo]:
         """Get all torrents from Transmission.
 
@@ -649,13 +666,26 @@ class TransmissionClient(TorrentClient):
             list[ClientTorrentInfo]: List of torrent information.
         """
         try:
-            torrents = self.client.get_torrents()
+            torrents = self.client.get_torrents(
+                arguments=[
+                    "name",
+                    "hashString",
+                    "percentDone",
+                    "totalSize",
+                    "files",
+                    "trackerList",
+                    "downloadDir",
+                    "status",
+                    "pieces",
+                    "pieceCount",
+                ]
+            )
             result = []
 
             for torrent in torrents:
                 result.append(
                     ClientTorrentInfo(
-                        id=str(torrent.id),
+                        id=torrent.hash_string,
                         name=torrent.name,
                         hash=torrent.hash_string,
                         progress=torrent.percent_done,
@@ -670,8 +700,8 @@ class TransmissionClient(TorrentClient):
                         ],
                         trackers=torrent.tracker_list,
                         download_dir=torrent.download_dir,
-                        state=TRANSMISSION_STATE_MAPPING.get(int(torrent.status), TorrentState.UNKNOWN),
-                        piece_progress=torrent.pieces if isinstance(torrent.pieces, list) else [],
+                        state=TRANSMISSION_STATE_MAPPING.get(torrent.status.value, TorrentState.UNKNOWN),
+                        piece_progress=self._decode_piece_progress(torrent.pieces, torrent.piece_count),
                     )
                 )
 
@@ -690,12 +720,54 @@ class TransmissionClient(TorrentClient):
             hash_match (bool): Not used for Transmission (has fast verification by default).
 
         Returns:
-            int: Torrent ID.
+            str: Torrent hash string.
         """
-        added_torrent = self.client.add_torrent(
-            torrent_data, download_dir=download_dir, paused=True, labels=[config.cfg.downloader.label]
-        )
-        return str(added_torrent.id)
+        # Note: We reimplement this method instead of using client.add_torrent()
+        # because we need access to the raw response data to detect torrent-duplicate
+        # and handle it appropriately in the injection logic.
+
+        # Get torrent data for RPC call
+        torrent_data_b64 = base64.b64encode(torrent_data).decode()
+
+        # Prepare arguments
+        kwargs = {
+            "download-dir": download_dir,
+            "paused": True,
+            "metainfo": torrent_data_b64,
+            "labels": [config.cfg.downloader.label],
+        }
+
+        # Make direct RPC call to get raw response
+        query = {"method": RpcMethod.TorrentAdd, "arguments": kwargs}
+        http_data = self.client._http_query(query)
+
+        # Parse JSON response
+        try:
+            data = json.loads(http_data)
+        except json.JSONDecodeError as error:
+            raise ValueError("failed to parse response as json", query, http_data) from error
+
+        if "result" not in data:
+            raise ValueError("Query failed, response data missing without result.", query, data, http_data)
+
+        if data["result"] != "success":
+            raise ValueError(f'Query failed with result "{data["result"]}".', query, data, http_data)
+
+        # Extract torrent info from arguments
+        res = data["arguments"]
+        torrent_info = None
+        if "torrent-added" in res:
+            torrent_info = res["torrent-added"]
+        elif "torrent-duplicate" in res:
+            torrent_info = res["torrent-duplicate"]
+            error_msg = f"The torrent to be injected cannot coexist with local torrent {torrent_info['hashString']}"
+            self.logger.error(error_msg)
+            raise TorrentConflictError(error_msg)
+
+        if not torrent_info:
+            raise ValueError("Invalid torrent-add response")
+
+        return torrent_info["hashString"]
 
     def _remove_torrent(self, torrent_id: str):
         """Remove torrent from Transmission.
@@ -708,9 +780,23 @@ class TransmissionClient(TorrentClient):
     def get_torrent_info(self, torrent_id: str) -> ClientTorrentInfo | None:
         """Get torrent information."""
         try:
-            torrent = self.client.get_torrent(torrent_id)
+            torrent = self.client.get_torrent(
+                torrent_id,
+                arguments=[
+                    "name",
+                    "hashString",
+                    "percentDone",
+                    "totalSize",
+                    "files",
+                    "trackerList",
+                    "downloadDir",
+                    "status",
+                    "pieces",
+                    "pieceCount",
+                ],
+            )
             return ClientTorrentInfo(
-                id=str(torrent.id),
+                id=torrent.hash_string,
                 name=torrent.name,
                 hash=torrent.hash_string,
                 progress=torrent.percent_done,
@@ -725,8 +811,8 @@ class TransmissionClient(TorrentClient):
                 ],
                 trackers=torrent.tracker_list,
                 download_dir=torrent.download_dir,
-                state=TRANSMISSION_STATE_MAPPING.get(int(torrent.status), TorrentState.UNKNOWN),
-                piece_progress=torrent.pieces if isinstance(torrent.pieces, list) else [],
+                state=TRANSMISSION_STATE_MAPPING.get(torrent.status.value, TorrentState.UNKNOWN),
+                piece_progress=self._decode_piece_progress(torrent.pieces, torrent.piece_count),
             )
         except Exception as e:
             self.logger.error("Error retrieving torrent info from Transmission: %s", e)
@@ -744,10 +830,10 @@ class TransmissionClient(TorrentClient):
         """Verify torrent integrity."""
         self.client.verify_torrent(torrent_id)
 
-    def _has_target_tracker(self, torrent_id: str, target_tracker: str) -> bool:
-        """Check if torrent contains target tracker."""
-        torrent = self.client.get_torrent(torrent_id)
-        return any(target_tracker in url for url in torrent.tracker_list)
+    def _get_torrent_name(self, torrent_id: str) -> str:
+        """Get torrent name by ID."""
+        torrent = self.client.get_torrent(torrent_id, arguments=["name"])
+        return torrent.name
 
     def resume_torrent(self, torrent_id: str) -> bool:
         """Resume downloading a torrent in Transmission."""
@@ -841,7 +927,14 @@ class QBittorrentClient(TorrentClient):
 
     def _add_torrent(self, torrent_data, download_dir: str, hash_match: bool) -> str:
         """Add torrent to qBittorrent."""
-        self.client.torrents_add(
+
+        # qBittorrent doesn't return the hash directly, we need to decode it
+        torrent_obj = torf.Torrent.read_stream(torrent_data)
+        info_hash = torrent_obj.infohash
+
+        current_time = time.time()
+
+        result = self.client.torrents_add(
             torrent_files=torrent_data,
             save_path=download_dir,
             is_paused=True,
@@ -849,9 +942,31 @@ class QBittorrentClient(TorrentClient):
             use_auto_torrent_management=False,
             is_skip_checking=hash_match,  # Skip hash checking if hash match
         )
-        # qBittorrent doesn't return the hash directly, we need to decode it
-        torrent_obj = torf.Torrent.read_stream(torrent_data)
-        info_hash = torrent_obj.infohash
+
+        # qBittorrent returns "Ok." for success and "Fails." for failure
+        if result != "Ok.":
+            # Check if torrent already exists by comparing add time
+            try:
+                torrent_info = self.client.torrents_info(torrent_hashes=info_hash)
+                if torrent_info:
+                    # Get the first (and should be only) torrent with this hash
+                    existing_torrent = torrent_info[0]
+                    # Convert add time to unix timestamp
+                    add_time = existing_torrent.added_on
+                    if add_time < current_time:
+                        raise TorrentConflictError(existing_torrent.hash)
+                    # Check if tracker is correct
+                    target_tracker = torrent_obj.trackers.flat[0] if torrent_obj.trackers else ""
+                    if existing_torrent.tracker != target_tracker:
+                        raise TorrentConflictError(existing_torrent.hash)
+
+            except TorrentConflictError as e:
+                error_msg = f"The torrent to be injected cannot coexist with local torrent {e}"
+                self.logger.error(error_msg)
+                raise TorrentConflictError(error_msg) from e
+            except Exception as e:
+                raise ValueError(f"Failed to add torrent to qBittorrent: {e}") from e
+
         return info_hash
 
     def _remove_torrent(self, torrent_id: str):
@@ -902,11 +1017,12 @@ class QBittorrentClient(TorrentClient):
         """Verify torrent integrity."""
         self.client.torrents_recheck(torrent_hashes=torrent_id)
 
-    def _has_target_tracker(self, torrent_id: str, target_tracker: str) -> bool:
-        """Check if torrent contains target tracker."""
-        trackers = self.client.torrents_trackers(torrent_hash=torrent_id)
-        tracker_urls = [tracker.url for tracker in trackers]
-        return any(target_tracker in url for url in tracker_urls)
+    def _get_torrent_name(self, torrent_id: str) -> str:
+        """Get torrent name by ID."""
+        torrent_info = self.client.torrents_info(torrent_hashes=torrent_id)
+        if torrent_info:
+            return torrent_info[0].name
+        return ""
 
     def resume_torrent(self, torrent_id: str) -> bool:
         """Resume downloading a torrent in qBittorrent."""
@@ -956,12 +1072,33 @@ class DelugeClient(TorrentClient):
     def get_torrents(self) -> list[ClientTorrentInfo]:
         """Get all torrents from Deluge."""
         try:
-            torrent_details = self.client.call("core.get_torrents_status", {}, [])
+            torrent_details = self.client.call(
+                "core.get_torrents_status",
+                {},
+                [
+                    "name",
+                    "hash",
+                    "progress",
+                    "total_size",
+                    "files",
+                    "file_progress",
+                    "trackers",
+                    "save_path",
+                    "state",
+                    "pieces",
+                    "num_pieces",
+                ],
+            )
             if torrent_details is None:
                 return []
             result = []
 
             for torrent_id, torrent_info in torrent_details.items():
+                if torrent_info["progress"] == 100.0:
+                    piece_progress = [True] * torrent_info["num_pieces"]
+                else:
+                    piece_progress = [piece == 3 for piece in torrent_info["pieces"]]
+
                 result.append(
                     ClientTorrentInfo(
                         id=torrent_id,
@@ -970,13 +1107,17 @@ class DelugeClient(TorrentClient):
                         progress=torrent_info["progress"] / 100.0,
                         total_size=torrent_info["total_size"],
                         files=[
-                            ClientTorrentFile(name=f["path"], size=f["size"], progress=f.get("progress", 0.0) / 100.0)
+                            ClientTorrentFile(
+                                name=f["path"],
+                                size=f["size"],
+                                progress=torrent_info["file_progress"][f["index"]],
+                            )
                             for f in torrent_info["files"]
                         ],
                         trackers=[t["url"] for t in torrent_info["trackers"]],
                         download_dir=torrent_info["save_path"],
                         state=DELUGE_STATE_MAPPING.get(torrent_info["state"], TorrentState.UNKNOWN),
-                        piece_progress=torrent_info.get("pieces", []),
+                        piece_progress=piece_progress,
                     )
                 )
 
@@ -989,16 +1130,30 @@ class DelugeClient(TorrentClient):
     def _add_torrent(self, torrent_data, download_dir: str, hash_match: bool) -> str:
         """Add torrent to Deluge."""
         torrent_b64 = base64.b64encode(torrent_data).decode()
-        torrent_id = self.client.call(
-            "core.add_torrent_file",
-            f"{os.urandom(16).hex()}.torrent",  # filename
-            torrent_b64,
-            {
-                "download_location": download_dir,
-                "add_paused": True,
-                "seed_mode": hash_match,  # Skip hash checking if hash match
-            },
-        )
+        try:
+            torrent_id = self.client.call(
+                "core.add_torrent_file",
+                f"{os.urandom(16).hex()}.torrent",  # filename
+                torrent_b64,
+                {
+                    "download_location": download_dir,
+                    "add_paused": True,
+                    "seed_mode": hash_match,  # Skip hash checking if hash match
+                },
+            )
+        except Exception as e:
+            if "Torrent already in session" in str(e):
+                # Extract torrent ID from error message
+                match = re.search(r"\(([a-f0-9]{40})\)", str(e))
+                if match:
+                    torrent_id = match.group(1)
+                    error_msg = f"The torrent to be injected cannot coexist with local torrent {torrent_id}"
+                    self.logger.error(error_msg)
+                    raise TorrentConflictError(error_msg) from e
+                else:
+                    raise TorrentConflictError(str(e)) from e
+            else:
+                raise
 
         # Set label (if provided)
         label = config.cfg.downloader.label
@@ -1024,11 +1179,28 @@ class DelugeClient(TorrentClient):
             torrent_info = self.client.call(
                 "core.get_torrent_status",
                 torrent_id,
-                ["name", "hash", "progress", "total_size", "files", "trackers", "save_path", "pieces"],
+                [
+                    "name",
+                    "hash",
+                    "progress",
+                    "total_size",
+                    "files",
+                    "file_progress",
+                    "trackers",
+                    "save_path",
+                    "state",
+                    "pieces",
+                    "num_pieces",
+                ],
             )
 
             if torrent_info is None:
                 return None
+
+            if torrent_info["progress"] == 100.0:
+                piece_progress = [True] * torrent_info["num_pieces"]
+            else:
+                piece_progress = [piece == 3 for piece in torrent_info["pieces"]]
 
             return ClientTorrentInfo(
                 id=torrent_id,
@@ -1037,13 +1209,17 @@ class DelugeClient(TorrentClient):
                 progress=torrent_info["progress"] / 100.0,
                 total_size=torrent_info["total_size"],
                 files=[
-                    ClientTorrentFile(name=f["path"], size=f["size"], progress=f.get("progress", 0.0) / 100.0)
+                    ClientTorrentFile(
+                        name=f["path"],
+                        size=f["size"],
+                        progress=torrent_info["file_progress"][f["index"]],
+                    )
                     for f in torrent_info["files"]
                 ],
                 trackers=[t["url"] for t in torrent_info["trackers"]],
                 download_dir=torrent_info["save_path"],
                 state=DELUGE_STATE_MAPPING.get(torrent_info["state"], TorrentState.UNKNOWN),
-                piece_progress=torrent_info.get("pieces", []),
+                piece_progress=piece_progress,
             )
         except Exception as e:
             self.logger.error("Error retrieving torrent info from Deluge: %s", e)
@@ -1064,13 +1240,12 @@ class DelugeClient(TorrentClient):
         """Verify torrent integrity."""
         self.client.call("core.force_recheck", [torrent_id])
 
-    def _has_target_tracker(self, torrent_id: str, target_tracker: str) -> bool:
-        """Check if torrent contains target tracker."""
-        torrent_info = self.client.call("core.get_torrent_status", torrent_id, ["trackers"])
+    def _get_torrent_name(self, torrent_id: str) -> str:
+        """Get torrent name by ID."""
+        torrent_info = self.client.call("core.get_torrent_status", torrent_id, ["name"])
         if torrent_info is None:
-            return False
-        tracker_urls = [tracker["url"] for tracker in torrent_info["trackers"]]
-        return any(target_tracker in url for url in tracker_urls)
+            return ""
+        return torrent_info.get("name", "")
 
     def resume_torrent(self, torrent_id: str) -> bool:
         """Resume downloading a torrent in Deluge."""

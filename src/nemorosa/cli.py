@@ -300,9 +300,8 @@ def main():
             )
         elif args.torrent:
             # Single torrent mode
-            app_logger.debug(f"Processing single torrent: {args.torrent}")
-
             processor = NemorosaCore()
+            app_logger.debug(f"Processing single torrent: {args.torrent}")
             result = processor.process_single_torrent(args.torrent)
 
             # Print result
