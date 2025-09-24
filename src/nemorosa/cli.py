@@ -332,6 +332,8 @@ def main():
             # Normal torrent processing flow
             processor = NemorosaCore()
             processor.process_torrents()
+            processor.retry_undownloaded_torrents()
+            processor.post_process_injected_torrents()
     except Exception as e:
         app_logger.critical("Error connecting to torrent client: %s", e)
         sys.exit(1)

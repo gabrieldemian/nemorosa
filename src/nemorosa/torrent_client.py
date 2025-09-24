@@ -879,7 +879,7 @@ class QBittorrentClient(TorrentClient):
     def __init__(self, url: str):
         super().__init__()
         config = parse_libtc_url(url)
-
+        self.torrents_dir = config.torrents_dir or ""
         self.client = qbittorrentapi.Client(
             host=config.url or "http://localhost:8080",
             username=config.username,
@@ -1046,6 +1046,10 @@ class QBittorrentClient(TorrentClient):
         """Get torrent data from qBittorrent by hash."""
         try:
             torrent_data = self.client.torrents_export(torrent_hash=torrent_hash)
+            if torrent_data is None:
+                torrent_path = posixpath.join(self.torrents_dir, torrent_hash + ".torrent")
+                with open(torrent_path, "rb") as f:
+                    return f.read()
             return torrent_data
         except Exception as e:
             self.logger.error(f"Error getting torrent data from qBittorrent: {e}")
@@ -1274,7 +1278,7 @@ class DelugeClient(TorrentClient):
     def _get_torrent_data_by_hash(self, torrent_hash: str) -> bytes | None:
         """Get torrent data from Deluge by hash."""
         try:
-            torrent_path = posixpath.join(str(self.torrents_dir), torrent_hash + ".torrent")
+            torrent_path = posixpath.join(self.torrents_dir, torrent_hash + ".torrent")
             with open(torrent_path, "rb") as f:
                 return f.read()
         except Exception as e:
@@ -1313,8 +1317,17 @@ def parse_libtc_url(url: str) -> TorrentClientConfig:
 
     Returns:
         TorrentClientConfig: Structured configuration object
+
+    Raises:
+        ValueError: If the URL scheme is not supported or URL is malformed
     """
+    if not url:
+        raise ValueError("URL cannot be empty")
+
     parsed = urlparse(url)
+    if not parsed.scheme:
+        raise ValueError("URL must have a scheme")
+
     scheme = parsed.scheme.split("+")
     netloc = parsed.netloc
 
@@ -1326,6 +1339,11 @@ def parse_libtc_url(url: str) -> TorrentClientConfig:
         username, password = auth.split(":", 1)
 
     client = scheme[0]
+
+    # Validate supported client types
+    supported_clients = ["transmission", "qbittorrent", "deluge", "rutorrent"]
+    if client not in supported_clients:
+        raise ValueError(f"Unsupported client type: {client}. Supported clients: {', '.join(supported_clients)}")
 
     if client in ["qbittorrent", "rutorrent"]:
         # For qBittorrent and rutorrent, use URL format
@@ -1363,7 +1381,21 @@ TORRENT_CLIENT_MAPPING = {
 
 
 def create_torrent_client(url: str) -> TorrentClient:
-    """Create a torrent client instance based on the URL scheme"""
+    """Create a torrent client instance based on the URL scheme
+
+    Args:
+        url: The torrent client URL
+
+    Returns:
+        TorrentClient: Configured torrent client instance
+
+    Raises:
+        ValueError: If URL is empty or client type is not supported
+        TypeError: If URL is None
+    """
+    if not url.strip():
+        raise ValueError("URL cannot be empty")
+
     parsed = urlparse(url)
     client_type = parsed.scheme.split("+")[0]
 

@@ -1,4 +1,4 @@
-"""Nemorosa - A specialized tool for cross-seeding torrents."""
+"""Nemorosa - Cross-seeding tool specifically designed for Gazelle-based music trackers."""
 
 __version__ = "0.0.1"
 __author__ = "KyokoMiki"

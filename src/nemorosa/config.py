@@ -292,8 +292,12 @@ downloader:
   # transmission+http://user:pass@host:port/transmission/rpc?torrents_dir=/path/to/session/
   # deluge://username:password@host:port/?torrents_dir=/path/to/session/
   # qbittorrent+http://username:password@host:port/?torrents_dir=/path/to/session/
+  # qbittorrent+http://username:password@host:port  # For qBittorrent 4.5.0+, torrents_dir is not needed
 
-  client: "transmission+http://user:pass@localhost:9091/transmission/rpc"
+  # For Windows: Use forward slashes (/) in torrents_dir path
+  # Example: ?torrents_dir=C:/Users/username/AppData/Local/qBittorrent/BT_backup
+
+  client: null
   label: "nemorosa"  # Download label (cannot be empty)
 
 target_site:
@@ -303,7 +307,7 @@ target_site:
   - server: "https://orpheus.network"
     api_key: "your_api_key_here"
   - server: "https://dicmusic.com"
-    cookie: "your_cookie_here" # only cookie is supported for dicmusic.com
+    cookie: "your_cookie_here" # For sites that don't support API, use cookie instead
 """
 
     with open(target_path_obj, "w", encoding="utf-8") as f:

@@ -28,7 +28,7 @@ COPY . .
 
 # Install the project in non-editable mode for production
 RUN --mount=type=cache,target=/opt/uv-cache \
-    uv sync --locked --no-editable
+    uv sync --locked --no-editable --no-dev
 
 # Create data directories for configuration and database
 RUN mkdir -p /app/data

@@ -1,10 +1,8 @@
 services:
   nemorosa:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/kyokomiki/nemorosa:latest
     container_name: nemorosa
-    restart: on-failure
+    restart: unless-stopped
     # user: "1000:1000"
     volumes:
       - ./data:/app/data

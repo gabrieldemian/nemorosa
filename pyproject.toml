@@ -8,10 +8,8 @@ version = "0.0.1"
 description = "A specialized cross-seeding tool designed for music torrents, featuring automatic file mapping, partial matching, and seamless torrent injection"
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }
-authors = [
-    { name = "KyokoMiki" },
-]
-keywords = ["torrent", "gazelle", "cross-seeding"]
+authors = [{ name = "KyokoMiki" }]
+keywords = ["torrent", "cross-seed"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
@@ -41,6 +39,7 @@ dependencies = [
 ]
 
 [project.urls]
+Documentation = "https://github.com/KyokoMiki/nemorosa/wiki"
 Homepage = "https://github.com/KyokoMiki/nemorosa"
 Repository = "https://github.com/KyokoMiki/nemorosa"
 Issues = "https://github.com/KyokoMiki/nemorosa/issues"
@@ -49,12 +48,7 @@ Issues = "https://github.com/KyokoMiki/nemorosa/issues"
 nemorosa = "nemorosa:main"
 
 [dependency-groups]
-dev = [
-    "httpx>=0.27.0",
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.23.0",
-    "ruff>=0.11.2",
-]
+dev = ["ruff>=0.11.2"]
 
 [tool.ruff]
 line-length = 120
@@ -77,4 +71,19 @@ select = [
 ]
 
 [tool.ruff.lint.flake8-bugbear]
-extend-immutable-calls = ["fastapi.Depends", "fastapi.params.Depends", "fastapi.Query", "fastapi.params.Query"]
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.params.Depends",
+    "fastapi.Query",
+    "fastapi.params.Query",
+]
+
+[tool.pyright]
+include = ["src"]
+typeCheckingMode = "standard"
+reportPossiblyUnboundVariable = "error"
+reportUnreachable = "error"
+reportInvalidCast = "error"
+reportUnsafeMultipleInheritance = "error"
+reportImplicitAbstractClass = "error"
+reportInvalidAbstractMethod = "error"

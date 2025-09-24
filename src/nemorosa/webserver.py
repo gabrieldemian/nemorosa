@@ -8,7 +8,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
-from . import api, config, logger, scheduler
+from . import __version__, api, config, logger, scheduler
 from .core import NemorosaCore
 
 
@@ -63,7 +63,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Nemorosa Web Server",
     description="Music torrent cross-seeding tool with automatic file mapping and seamless injection",
-    version="0.0.1",
+    version=__version__,
     lifespan=lifespan,
 )
 
@@ -103,7 +103,7 @@ async def root():
     """Root endpoint."""
     return {
         "message": "Nemorosa Web Server",
-        "version": "0.0.1",
+        "version": __version__,
         "endpoints": {
             "webhook": "/api/webhook",
             "announce": "/api/announce",
@@ -260,6 +260,9 @@ async def trigger_job(
             job_name=result.get("job_name"),
         )
 
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid job type: {str(e)}") from e
     except Exception as e:
