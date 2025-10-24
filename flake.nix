@@ -1,4 +1,3 @@
-# SPDX-License-Identifier: Unlicense
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -17,7 +16,8 @@
           buildInputs = [
             pkgs.python3
             pkgs.uv
-            pkgs.basedpyright
+            pkgs.pyright
+            pkgs.ruff
           ];
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [ pkgs.stdenv.cc.cc ];
         };
